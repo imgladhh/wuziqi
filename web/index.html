@@ -23,6 +23,7 @@
         <div class="info-grid">
           <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
           <span>Turn</span><strong id="turnLabel">Your turn</strong>
+          <span>Move timer</span><strong id="turnTimerLabel">None</strong>
           <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
           <span>Room code</span><strong id="roomCodeLabel">None</strong>
           <span>Connection</span><strong id="linkStateLabel">Offline</strong>
@@ -30,21 +31,16 @@
       </section>
 
       <section class="card">
-        <h2>Local Mode</h2>
-        <div class="toolbar">
-          <select id="depthSelect">
-            <option value="2">AI Depth 2</option>
-            <option value="3">AI Depth 3</option>
-          </select>
-          <button id="startLocalBtn" class="primary">Start Local Game</button>
-          <button id="undoLocalBtn">Undo Local Move</button>
-        </div>
-      </section>
-
-      <section class="card">
         <h2>Online Mode</h2>
         <div class="toolbar">
           <input id="playerNameInput" type="text" maxlength="20" placeholder="Your nickname">
+          <select id="turnLimitSelect">
+            <option value="20">20s per move</option>
+            <option value="30" selected>30s per move</option>
+            <option value="45">45s per move</option>
+            <option value="60">60s per move</option>
+            <option value="90">90s per move</option>
+          </select>
           <div class="inline">
             <button id="createRoomBtn">Create Room</button>
             <button id="copyRoomBtn">Copy Code</button>
@@ -72,6 +68,18 @@
             <input id="chatInput" type="text" maxlength="300" placeholder="Type a message">
             <button id="sendChatBtn">Send</button>
           </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Local Mode</h2>
+        <div class="toolbar">
+          <select id="depthSelect">
+            <option value="2">AI Depth 2</option>
+            <option value="3">AI Depth 3</option>
+          </select>
+          <button id="startLocalBtn" class="primary">Start Local Game</button>
+          <button id="undoLocalBtn">Undo Local Move</button>
         </div>
       </section>
     </aside>

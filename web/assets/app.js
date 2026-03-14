@@ -11,6 +11,7 @@ const state = {
   room: null,
   roomCode: "",
   hoverPoint: null,
+  leavingRoom: false,
 };
 
 const els = {
@@ -18,6 +19,7 @@ const els = {
   status: document.getElementById("status"),
   modeLabel: document.getElementById("modeLabel"),
   turnLabel: document.getElementById("turnLabel"),
+  turnTimerLabel: document.getElementById("turnTimerLabel"),
   lastMoveLabel: document.getElementById("lastMoveLabel"),
   roomCodeLabel: document.getElementById("roomCodeLabel"),
   linkStateLabel: document.getElementById("linkStateLabel"),
@@ -25,6 +27,7 @@ const els = {
   startLocalBtn: document.getElementById("startLocalBtn"),
   undoLocalBtn: document.getElementById("undoLocalBtn"),
   playerNameInput: document.getElementById("playerNameInput"),
+  turnLimitSelect: document.getElementById("turnLimitSelect"),
   createRoomBtn: document.getElementById("createRoomBtn"),
   copyRoomBtn: document.getElementById("copyRoomBtn"),
   roomCodeInput: document.getElementById("roomCodeInput"),
@@ -37,7 +40,6 @@ const els = {
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
 };
-
 const ctx = els.board.getContext("2d");
 
 async function api(path, options = {}) {
@@ -222,6 +224,35 @@ async function sendChat() {
   updateInfo();
 }
 
+async function leaveRoom({ silent = false } = {}) {
+  if (!state.roomCode || state.leavingRoom) return;
+  state.leavingRoom = true;
+  const code = state.roomCode;
+  try {
+    await api("/api/rooms/leave", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  } catch (error) {
+    if (!silent) {
+      handleApiError(error);
+    }
+  } finally {
+    state.room = null;
+    state.roomCode = "";
+    els.roomCodeInput.value = "";
+    els.acceptUndoBtn.classList.add("hidden");
+    els.rejectUndoBtn.classList.add("hidden");
+    state.leavingRoom = false;
+  }
+}
+
+function leaveRoomOnUnload() {
+  if (!state.roomCode) return;
+  const payload = JSON.stringify({ code: state.roomCode });
+  const blob = new Blob([payload], { type: "application/json" });
+  navigator.sendBeacon("/api/rooms/leave", blob);
+}
 function updateInfo() {
   if (state.mode === "local" && state.local) {
     els.modeLabel.textContent = "Local vs AI";
@@ -231,6 +262,7 @@ function updateInfo() {
     } else {
       els.turnLabel.textContent = state.local.current_turn === "black" ? "Your turn" : "AI turn";
     }
+    els.turnTimerLabel.textContent = "None";
     els.lastMoveLabel.textContent = formatMove(state.local.last_opponent_move);
     els.roomCodeLabel.textContent = "None";
     els.linkStateLabel.textContent = "Offline";
@@ -243,10 +275,17 @@ function updateInfo() {
     els.modeLabel.textContent = "Online Room";
     if (state.room.winner !== "empty") {
       els.turnLabel.textContent = "Game Over";
-      setStatus(state.room.winner === state.room.your_stone ? "Player wins." : "Opponent wins.");
+      if (state.room.win_reason === "timeout") {
+        setStatus(state.room.winner === state.room.your_stone ? "You win on time." : "You lose on time.");
+      } else {
+        setStatus(state.room.winner === state.room.your_stone ? "Player wins." : "Opponent wins.");
+      }
     } else {
       els.turnLabel.textContent = state.room.your_turn ? "Your turn" : "Opponent turn";
     }
+    els.turnTimerLabel.textContent = state.room.turn_timer_active
+      ? `${state.room.turn_time_left_seconds}s / ${state.room.turn_time_limit_seconds}s`
+      : "Paused";
     els.lastMoveLabel.textContent = formatMove(state.room.opponent_last_move);
     els.roomCodeLabel.textContent = state.room.code || "None";
     if (state.room.pending_undo_request) {
@@ -261,9 +300,9 @@ function updateInfo() {
     renderChat(state.room.chat_messages || []);
     return;
   }
+  els.turnTimerLabel.textContent = "None";
   renderChat([]);
 }
-
 function setStatus(text) {
   els.status.textContent = text;
 }
@@ -282,6 +321,9 @@ function handleApiError(error) {
 }
 
 async function startLocal() {
+  if (state.roomCode) {
+    await leaveRoom({ silent: true });
+  }
   const data = await api("/api/local/new", {
     method: "POST",
     body: JSON.stringify({ depth: Number(els.depthSelect.value) }),
@@ -302,10 +344,14 @@ async function localUndo() {
 }
 
 async function createRoom() {
+  if (state.roomCode) {
+    await leaveRoom({ silent: true });
+  }
   const name = els.playerNameInput.value.trim() || "Host";
+  const turnLimitSeconds = Number(els.turnLimitSelect.value || 30);
   const data = await api("/api/rooms/create", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, turn_limit_seconds: turnLimitSeconds }),
   });
   state.mode = "room";
   state.room = data.room;
@@ -314,8 +360,10 @@ async function createRoom() {
   setStatus(`Room created: ${data.room.code}`);
   updateInfo();
 }
-
 async function joinRoom() {
+  if (state.roomCode) {
+    await leaveRoom({ silent: true });
+  }
   const code = els.roomCodeInput.value.trim().toUpperCase();
   const name = els.playerNameInput.value.trim() || "Player";
   const data = await api("/api/rooms/join", {
@@ -460,6 +508,8 @@ els.chatInput.addEventListener("keydown", (event) => {
     sendChat().catch(handleApiError);
   }
 });
+
+window.addEventListener("pagehide", leaveRoomOnUnload);
 
 els.copyRoomBtn.addEventListener("click", async () => {
   if (!state.roomCode) return setStatus("No room code available.");

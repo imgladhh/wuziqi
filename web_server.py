@@ -20,6 +20,7 @@ STATIC_DIR = ROOT / "web"
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 ROOM_TTL_SECONDS = int(os.environ.get("ROOM_TTL_SECONDS", "1800"))
+DEFAULT_ROOM_TURN_LIMIT_SECONDS = int(os.environ.get("ROOM_TURN_LIMIT_SECONDS", "30"))
 
 
 def stone_name(stone: int) -> str:
@@ -47,6 +48,52 @@ def add_room_message(room: "Room", sender: str, text: str, *, session_id: str | 
     room.updated_at = now_ts()
 
 
+def session_for_stone(room: "Room", stone: int) -> Optional[str]:
+    for session_id, player_stone in room.players.items():
+        if player_stone == stone:
+            return session_id
+    return None
+
+
+def room_winner(room: "Room") -> int:
+    return room.board.winner or room.timeout_winner
+
+
+def room_win_reason(room: "Room") -> str:
+    if room.timeout_winner != EMPTY:
+        return "timeout"
+    if room.board.winner != EMPTY:
+        return "line"
+    if room.board.move_count >= room.board.size * room.board.size:
+        return "draw"
+    return ""
+
+
+def room_timer_active(room: "Room") -> bool:
+    return len(room.players) >= 2 and room_winner(room) == EMPTY
+
+
+def room_time_left(room: "Room") -> int:
+    if not room_timer_active(room):
+        return room.turn_limit_seconds
+    elapsed = max(0, now_ts() - room.turn_started_at)
+    return max(0, room.turn_limit_seconds - elapsed)
+
+
+def apply_room_timeout(room: "Room") -> None:
+    if not room_timer_active(room):
+        return
+    if room_time_left(room) > 0:
+        return
+    loser_stone = room.current_turn
+    winner_stone = opponent(loser_stone)
+    room.timeout_winner = winner_stone
+    room.pending_undo_request = None
+    loser_name = room.names.get(session_for_stone(room, loser_stone) or "", "A player")
+    winner_name = room.names.get(session_for_stone(room, winner_stone) or "", "A player")
+    add_room_message(room, "System", f"{loser_name} ran out of time. {winner_name} wins on time.", system=True)
+
+
 @dataclass
 class LocalGame:
     board: GameBoard = field(default_factory=GameBoard)
@@ -71,6 +118,9 @@ class Room:
     pending_undo_request: Optional[str] = None
     last_move: Optional[tuple[int, int, int]] = None
     updated_at: int = field(default_factory=now_ts)
+    turn_started_at: int = field(default_factory=now_ts)
+    turn_limit_seconds: int = DEFAULT_ROOM_TURN_LIMIT_SECONDS
+    timeout_winner: int = EMPTY
     chat_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -78,6 +128,8 @@ class Room:
         self.current_turn = BLACK
         self.pending_undo_request = None
         self.last_move = None
+        self.turn_started_at = now_ts()
+        self.timeout_winner = EMPTY
         self.updated_at = now_ts()
 
     def undo_round(self) -> int:
@@ -90,6 +142,8 @@ class Room:
         self.current_turn = BLACK if self.board.move_count % 2 == 0 else WHITE
         self.last_move = self.board.history[-1] if self.board.history else None
         self.pending_undo_request = None
+        self.turn_started_at = now_ts()
+        self.timeout_winner = EMPTY
         self.updated_at = now_ts()
         return undone
 
@@ -105,12 +159,12 @@ class GameStore:
             self.local_games[session_id] = LocalGame()
         return self.local_games[session_id]
 
-    def create_room(self, session_id: str, name: str) -> Room:
+    def create_room(self, session_id: str, name: str, turn_limit_seconds: int) -> Room:
         self.prune_expired_rooms()
         code = room_code()
         while code in self.rooms:
             code = room_code()
-        room = Room(code=code)
+        room = Room(code=code, turn_limit_seconds=turn_limit_seconds)
         host_name = name or "Host"
         room.players[session_id] = BLACK
         room.names[session_id] = host_name
@@ -131,6 +185,9 @@ class GameStore:
         self.prune_expired_rooms()
         return self.rooms.get(code)
 
+    def remove_room(self, code: str) -> None:
+        self.rooms.pop(code, None)
+
 
 STORE = GameStore()
 
@@ -150,6 +207,7 @@ def local_state_payload(game: LocalGame) -> dict[str, Any]:
 
 
 def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
+    apply_room_timeout(room)
     your_stone = room.players.get(session_id, EMPTY)
     opponent_move = None
     if room.last_move and room.last_move[2] == opponent(your_stone):
@@ -160,15 +218,19 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
     return {
         "code": room.code,
         "board": board_payload(room.board),
-        "winner": stone_name(room.board.winner),
+        "winner": stone_name(room_winner(room)),
+        "win_reason": room_win_reason(room),
         "current_turn": stone_name(room.current_turn),
         "your_stone": stone_name(your_stone),
-        "your_turn": your_stone != EMPTY and room.current_turn == your_stone and room.board.winner == EMPTY,
+        "your_turn": your_stone != EMPTY and room.current_turn == your_stone and room_winner(room) == EMPTY,
         "players": {
             stone_name(stone): room.names[sid]
             for sid, stone in room.players.items()
         },
         "connected_count": len(room.players),
+        "turn_time_limit_seconds": room.turn_limit_seconds,
+        "turn_time_left_seconds": room_time_left(room),
+        "turn_timer_active": room_timer_active(room),
         "pending_undo_request": room.pending_undo_request is not None,
         "pending_undo_from_you": room.pending_undo_request == session_id,
         "opponent_last_move": opponent_move,
@@ -222,6 +284,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.handle_room_undo()
         if path == "/api/rooms/chat":
             return self.handle_room_chat()
+        if path == "/api/rooms/leave":
+            return self.handle_room_leave()
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def serve_asset(self, relative_path: str) -> None:
@@ -322,8 +386,10 @@ class AppHandler(BaseHTTPRequestHandler):
         session_id = self.session_id()
         body = self.read_json()
         name = str(body.get("name", "Host")).strip() or "Host"
+        turn_limit_seconds = int(body.get("turn_limit_seconds", DEFAULT_ROOM_TURN_LIMIT_SECONDS))
+        turn_limit_seconds = max(10, min(300, turn_limit_seconds))
         with STORE.lock:
-            room = STORE.create_room(session_id, name)
+            room = STORE.create_room(session_id, name, turn_limit_seconds)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
@@ -339,8 +405,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if session_id not in room.players:
                 if len(room.players) >= 2:
                     return self.send_json({"ok": False, "error": "Room is full."}, 400, session_id)
-                room.players[session_id] = WHITE
+                room.players[session_id] = BLACK if BLACK not in room.players.values() else WHITE
                 room.names[session_id] = name
+                room.turn_started_at = now_ts()
                 add_room_message(room, "System", f"{name} joined the room.", system=True)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
@@ -364,13 +431,18 @@ class AppHandler(BaseHTTPRequestHandler):
             room = STORE.get_room(code)
             if room is None:
                 return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
+            apply_room_timeout(room)
             stone = room.players.get(session_id, EMPTY)
             if stone == EMPTY:
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
+            if room_winner(room) != EMPTY:
+                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
             if room.current_turn != stone or not room.board.place(x, y, stone):
                 return self.send_json({"ok": False, "error": "You cannot move right now."}, 400, session_id)
             room.current_turn = opponent(stone)
             room.last_move = (x, y, stone)
+            room.turn_started_at = now_ts()
+            room.pending_undo_request = None
             room.updated_at = now_ts()
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
@@ -402,6 +474,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             if session_id not in room.players:
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
+            apply_room_timeout(room)
+            if room_winner(room) != EMPTY:
+                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
             if action == "request":
                 room.pending_undo_request = session_id
                 actor = room.names.get(session_id, "A player")
@@ -438,6 +513,29 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
             sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
             add_room_message(room, sender, message_text, session_id=session_id)
+            payload = room_state_payload(room, session_id)
+        self.send_json({"ok": True, "room": payload}, session_id=session_id)
+
+    def handle_room_leave(self) -> None:
+        session_id = self.session_id()
+        body = self.read_json()
+        code = str(body.get("code", "")).strip().upper()
+        with STORE.lock:
+            room = STORE.get_room(code)
+            if room is None:
+                return self.send_json({"ok": True, "room": None}, session_id=session_id)
+            stone = room.players.pop(session_id, EMPTY)
+            actor = room.names.pop(session_id, "A player")
+            if stone == EMPTY:
+                payload = room_state_payload(room, session_id) if room.code in STORE.rooms else None
+                return self.send_json({"ok": True, "room": payload}, session_id=session_id)
+            if room.pending_undo_request == session_id:
+                room.pending_undo_request = None
+            if not room.players:
+                STORE.remove_room(code)
+                return self.send_json({"ok": True, "room": None}, session_id=session_id)
+            room.turn_started_at = now_ts()
+            add_room_message(room, "System", f"{actor} left the room.", system=True)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
