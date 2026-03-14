@@ -202,6 +202,19 @@ function setStatus(text) {
   els.status.textContent = text;
 }
 
+function handleApiError(error) {
+  const message = error.message || "Request failed.";
+  if (message.includes("Room not found or expired")) {
+    state.room = null;
+    state.roomCode = "";
+    els.roomCodeInput.value = "";
+    els.acceptUndoBtn.classList.add("hidden");
+    els.rejectUndoBtn.classList.add("hidden");
+    updateInfo();
+  }
+  setStatus(message);
+}
+
 async function startLocal() {
   const data = await api("/api/local/new", {
     method: "POST",
@@ -290,7 +303,7 @@ async function refresh() {
     }
     updateInfo();
   } catch (error) {
-    setStatus(error.message);
+    handleApiError(error);
   }
 }
 
@@ -331,7 +344,7 @@ els.board.addEventListener("click", async (event) => {
       updateInfo();
     }
   } catch (error) {
-    setStatus(error.message);
+    handleApiError(error);
   }
 });
 
@@ -360,19 +373,19 @@ els.board.addEventListener("mouseleave", () => {
   }
 });
 
-els.startLocalBtn.addEventListener("click", () => startLocal().catch((error) => setStatus(error.message)));
-els.undoLocalBtn.addEventListener("click", () => localUndo().catch((error) => setStatus(error.message)));
-els.createRoomBtn.addEventListener("click", () => createRoom().catch((error) => setStatus(error.message)));
-els.joinRoomBtn.addEventListener("click", () => joinRoom().catch((error) => setStatus(error.message)));
-els.undoRoomBtn.addEventListener("click", () => roomUndo().catch((error) => setStatus(error.message)));
-els.resetRoomBtn.addEventListener("click", () => resetRoom().catch((error) => setStatus(error.message)));
-els.acceptUndoBtn.addEventListener("click", () => roomUndo("accept").catch((error) => setStatus(error.message)));
-els.rejectUndoBtn.addEventListener("click", () => roomUndo("reject").catch((error) => setStatus(error.message)));
+els.startLocalBtn.addEventListener("click", () => startLocal().catch(handleApiError));
+els.undoLocalBtn.addEventListener("click", () => localUndo().catch(handleApiError));
+els.createRoomBtn.addEventListener("click", () => createRoom().catch(handleApiError));
+els.joinRoomBtn.addEventListener("click", () => joinRoom().catch(handleApiError));
+els.undoRoomBtn.addEventListener("click", () => roomUndo().catch(handleApiError));
+els.resetRoomBtn.addEventListener("click", () => resetRoom().catch(handleApiError));
+els.acceptUndoBtn.addEventListener("click", () => roomUndo("accept").catch(handleApiError));
+els.rejectUndoBtn.addEventListener("click", () => roomUndo("reject").catch(handleApiError));
 els.copyRoomBtn.addEventListener("click", async () => {
   if (!state.roomCode) return setStatus("No room code available.");
   await navigator.clipboard.writeText(state.roomCode);
   setStatus(`Room code copied: ${state.roomCode}`);
 });
 
-startLocal().catch((error) => setStatus(error.message));
+startLocal().catch(handleApiError);
 setInterval(refresh, POLL_MS);

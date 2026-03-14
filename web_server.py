@@ -19,6 +19,7 @@ ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "web"
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
+ROOM_TTL_SECONDS = int(os.environ.get("ROOM_TTL_SECONDS", "1800"))
 
 
 def stone_name(stone: int) -> str:
@@ -91,6 +92,7 @@ class GameStore:
         return self.local_games[session_id]
 
     def create_room(self, session_id: str, name: str) -> Room:
+        self.prune_expired_rooms()
         code = room_code()
         while code in self.rooms:
             code = room_code()
@@ -99,6 +101,19 @@ class GameStore:
         room.names[session_id] = name or "房主"
         self.rooms[code] = room
         return room
+
+    def prune_expired_rooms(self) -> None:
+        expired_codes = [
+            code
+            for code, room in self.rooms.items()
+            if now_ts() - room.updated_at > ROOM_TTL_SECONDS
+        ]
+        for code in expired_codes:
+            self.rooms.pop(code, None)
+
+    def get_room(self, code: str) -> Optional[Room]:
+        self.prune_expired_rooms()
+        return self.rooms.get(code)
 
 
 STORE = GameStore()
@@ -290,12 +305,12 @@ class AppHandler(BaseHTTPRequestHandler):
         code = str(body.get("code", "")).strip().upper()
         name = str(body.get("name", "玩家")).strip() or "玩家"
         with STORE.lock:
-            room = STORE.rooms.get(code)
+            room = STORE.get_room(code)
             if room is None:
-                return self.send_json({"ok": False, "error": "房间不存在。"}, 404, session_id)
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             if session_id not in room.players:
                 if len(room.players) >= 2:
-                    return self.send_json({"ok": False, "error": "房间已满。"}, 400, session_id)
+                    return self.send_json({"ok": False, "error": "Room is full."}, 400, session_id)
                 room.players[session_id] = WHITE
                 room.names[session_id] = name
                 room.updated_at = now_ts()
@@ -306,9 +321,9 @@ class AppHandler(BaseHTTPRequestHandler):
         session_id = self.session_id()
         code = parse_qs(parsed.query).get("code", [""])[0].upper()
         with STORE.lock:
-            room = STORE.rooms.get(code)
+            room = STORE.get_room(code)
             if room is None:
-                return self.send_json({"ok": False, "error": "房间不存在。"}, 404, session_id)
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
@@ -318,14 +333,14 @@ class AppHandler(BaseHTTPRequestHandler):
         code = str(body["code"]).upper()
         x, y = int(body["x"]), int(body["y"])
         with STORE.lock:
-            room = STORE.rooms.get(code)
+            room = STORE.get_room(code)
             if room is None:
-                return self.send_json({"ok": False, "error": "房间不存在。"}, 404, session_id)
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             stone = room.players.get(session_id, EMPTY)
             if stone == EMPTY:
-                return self.send_json({"ok": False, "error": "你不在该房间中。"}, 403, session_id)
+                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             if room.current_turn != stone or not room.board.place(x, y, stone):
-                return self.send_json({"ok": False, "error": "当前无法落子。"}, 400, session_id)
+                return self.send_json({"ok": False, "error": "You cannot move right now."}, 400, session_id)
             room.current_turn = opponent(stone)
             room.last_move = (x, y, stone)
             room.updated_at = now_ts()
@@ -337,11 +352,11 @@ class AppHandler(BaseHTTPRequestHandler):
         body = self.read_json()
         code = str(body["code"]).upper()
         with STORE.lock:
-            room = STORE.rooms.get(code)
+            room = STORE.get_room(code)
             if room is None:
-                return self.send_json({"ok": False, "error": "房间不存在。"}, 404, session_id)
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             if session_id not in room.players:
-                return self.send_json({"ok": False, "error": "你不在该房间中。"}, 403, session_id)
+                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             room.reset()
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
@@ -352,23 +367,23 @@ class AppHandler(BaseHTTPRequestHandler):
         code = str(body["code"]).upper()
         action = str(body["action"])
         with STORE.lock:
-            room = STORE.rooms.get(code)
+            room = STORE.get_room(code)
             if room is None:
-                return self.send_json({"ok": False, "error": "房间不存在。"}, 404, session_id)
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             if session_id not in room.players:
-                return self.send_json({"ok": False, "error": "你不在该房间中。"}, 403, session_id)
+                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             if action == "request":
                 room.pending_undo_request = session_id
                 room.updated_at = now_ts()
             elif action == "accept":
                 if room.pending_undo_request is None:
-                    return self.send_json({"ok": False, "error": "当前没有待处理的悔棋请求。"}, 400, session_id)
+                    return self.send_json({"ok": False, "error": "There is no pending undo request."}, 400, session_id)
                 room.undo_round()
             elif action == "reject":
                 room.pending_undo_request = None
                 room.updated_at = now_ts()
             else:
-                return self.send_json({"ok": False, "error": "未知操作。"}, 400, session_id)
+                return self.send_json({"ok": False, "error": "Unknown action."}, 400, session_id)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 

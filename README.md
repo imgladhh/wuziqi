@@ -96,3 +96,4 @@ https://wuziqi-web.onrender.com
 - 当前服务端数据保存在内存中，服务重启后房间会清空
 - 本地默认监听端口是 `8000`
 - 部署到 Render 时会自动读取平台注入的 `PORT`
+- 房间默认 30 分钟无活动自动过期，可通过环境变量 `ROOM_TTL_SECONDS` 调整
