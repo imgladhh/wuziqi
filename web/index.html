@@ -7,31 +7,34 @@
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <main class="app">
-    <section class="board-shell">
-      <canvas id="board" width="620" height="620"></canvas>
+  <main id="landingScreen" class="landing-screen">
+    <section class="landing-shell">
+      <p class="eyebrow">Gomoku Online</p>
+      <h1>Choose Your Mode</h1>
+      <p class="landing-copy">Start a local AI match or head into an online room with a cleaner game-first layout.</p>
+      <div class="landing-grid">
+        <button id="goLocalBtn" class="mode-card mode-local">
+          <span class="mode-title">Local Mode</span>
+          <span class="mode-subtitle">Play against the minimax AI on this device.</span>
+        </button>
+        <button id="goOnlineBtn" class="mode-card mode-online">
+          <span class="mode-title">Online Mode</span>
+          <span class="mode-subtitle">Create or join a room and play with chat.</span>
+        </button>
+      </div>
     </section>
-    <aside class="sidebar">
-      <header class="hero">
-        <p class="eyebrow">Gomoku Online</p>
-        <h1>Gomoku Web Match</h1>
-        <p id="status">Ready to play</p>
-      </header>
+  </main>
 
-      <section class="card">
-        <h2>Match Info</h2>
-        <div class="info-grid">
-          <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
-          <span>Turn</span><strong id="turnLabel">Your turn</strong>
-          <span>Move timer</span><strong id="turnTimerLabel">None</strong>
-          <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
-          <span>Room code</span><strong id="roomCodeLabel">None</strong>
-          <span>Connection</span><strong id="linkStateLabel">Offline</strong>
+  <main id="onlineSetupScreen" class="setup-screen hidden">
+    <section class="setup-shell">
+      <header class="setup-header">
+        <button id="backToHomeFromSetupBtn" class="ghost-btn">Back</button>
+        <div>
+          <p class="eyebrow">Online Lobby</p>
+          <h1>Enter An Online Room</h1>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>Online Mode</h2>
+      </header>
+      <section class="card setup-card">
         <div class="toolbar">
           <input id="playerNameInput" type="text" maxlength="20" placeholder="Your nickname">
           <select id="turnLimitSelect">
@@ -49,6 +52,51 @@
             <input id="roomCodeInput" type="text" maxlength="6" placeholder="Enter room code">
             <button id="joinRoomBtn">Join Room</button>
           </div>
+          <p id="setupStatus" class="setup-status">Create a room or join one with a room code.</p>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <main id="gameScreen" class="app hidden">
+    <section class="board-shell">
+      <canvas id="board" width="620" height="620"></canvas>
+    </section>
+    <aside class="sidebar">
+      <header class="hero">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Gomoku Match</p>
+            <h1>Board View</h1>
+          </div>
+          <button id="backHomeBtn" class="ghost-btn">Home</button>
+        </div>
+        <p id="status">Ready to play</p>
+      </header>
+
+      <section class="card">
+        <h2>Match Info</h2>
+        <div class="info-grid">
+          <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
+          <span>Turn</span><strong id="turnLabel">Your turn</strong>
+          <span>Move timer</span><strong id="turnTimerLabel">None</strong>
+          <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
+          <span>Room code</span><strong id="roomCodeLabel">None</strong>
+          <span>Connection</span><strong id="linkStateLabel">Offline</strong>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Actions</h2>
+        <div id="localActions" class="toolbar hidden">
+          <select id="depthSelect">
+            <option value="2">AI Depth 2</option>
+            <option value="3">AI Depth 3</option>
+          </select>
+          <button id="startLocalBtn" class="primary">Restart Local Game</button>
+          <button id="undoLocalBtn">Undo Local Move</button>
+        </div>
+        <div id="onlineActions" class="toolbar hidden">
           <div class="inline">
             <button id="undoRoomBtn">Request Undo</button>
             <button id="resetRoomBtn">Reset Board</button>
@@ -60,7 +108,7 @@
         </div>
       </section>
 
-      <section class="card">
+      <section id="chatCard" class="card hidden">
         <h2>Room Chat</h2>
         <div class="toolbar chat-toolbar">
           <div id="chatMessages" class="chat-messages"></div>
@@ -68,18 +116,6 @@
             <input id="chatInput" type="text" maxlength="300" placeholder="Type a message">
             <button id="sendChatBtn">Send</button>
           </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Local Mode</h2>
-        <div class="toolbar">
-          <select id="depthSelect">
-            <option value="2">AI Depth 2</option>
-            <option value="3">AI Depth 3</option>
-          </select>
-          <button id="startLocalBtn" class="primary">Start Local Game</button>
-          <button id="undoLocalBtn">Undo Local Move</button>
         </div>
       </section>
     </aside>

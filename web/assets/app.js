@@ -6,6 +6,7 @@ const POLL_MS = 1000;
 
 const state = {
   sessionId: localStorage.getItem("wuziqi_session") || "",
+  screen: "landing",
   mode: "local",
   local: null,
   room: null,
@@ -15,6 +16,14 @@ const state = {
 };
 
 const els = {
+  landingScreen: document.getElementById("landingScreen"),
+  onlineSetupScreen: document.getElementById("onlineSetupScreen"),
+  gameScreen: document.getElementById("gameScreen"),
+  goLocalBtn: document.getElementById("goLocalBtn"),
+  goOnlineBtn: document.getElementById("goOnlineBtn"),
+  backToHomeFromSetupBtn: document.getElementById("backToHomeFromSetupBtn"),
+  backHomeBtn: document.getElementById("backHomeBtn"),
+  setupStatus: document.getElementById("setupStatus"),
   board: document.getElementById("board"),
   status: document.getElementById("status"),
   modeLabel: document.getElementById("modeLabel"),
@@ -36,10 +45,14 @@ const els = {
   resetRoomBtn: document.getElementById("resetRoomBtn"),
   acceptUndoBtn: document.getElementById("acceptUndoBtn"),
   rejectUndoBtn: document.getElementById("rejectUndoBtn"),
+  localActions: document.getElementById("localActions"),
+  onlineActions: document.getElementById("onlineActions"),
+  chatCard: document.getElementById("chatCard"),
   chatMessages: document.getElementById("chatMessages"),
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
 };
+
 const ctx = els.board.getContext("2d");
 
 async function api(path, options = {}) {
@@ -55,6 +68,21 @@ async function api(path, options = {}) {
     throw new Error(data.error || "Request failed.");
   }
   return data;
+}
+
+function showScreen(screen) {
+  state.screen = screen;
+  els.landingScreen.classList.toggle("hidden", screen !== "landing");
+  els.onlineSetupScreen.classList.toggle("hidden", screen !== "online-setup");
+  els.gameScreen.classList.toggle("hidden", screen !== "game");
+}
+
+function syncPanels() {
+  const isLocalGame = state.screen === "game" && state.mode === "local";
+  const isOnlineGame = state.screen === "game" && state.mode === "room";
+  els.localActions.classList.toggle("hidden", !isLocalGame);
+  els.onlineActions.classList.toggle("hidden", !isOnlineGame);
+  els.chatCard.classList.toggle("hidden", !isOnlineGame);
 }
 
 function drawBoard(payload, highlight) {
@@ -165,6 +193,14 @@ function formatMove(move) {
   return move ? `${move[0] + 1},${move[1] + 1}` : "None";
 }
 
+function setStatus(text) {
+  els.status.textContent = text;
+}
+
+function setSetupStatus(text) {
+  els.setupStatus.textContent = text;
+}
+
 function renderChat(messages) {
   els.chatMessages.innerHTML = "";
   if (!messages || messages.length === 0) {
@@ -206,54 +242,10 @@ function renderChat(messages) {
 
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
-async function sendChat() {
-  if (!state.roomCode) {
-    return setStatus("Join or create a room first.");
-  }
-  const text = els.chatInput.value.trim();
-  if (!text) {
-    return setStatus("Message cannot be empty.");
-  }
-  const data = await api("/api/rooms/chat", {
-    method: "POST",
-    body: JSON.stringify({ code: state.roomCode, text }),
-  });
-  state.room = data.room;
-  els.chatInput.value = "";
-  setStatus("Message sent.");
-  updateInfo();
-}
 
-async function leaveRoom({ silent = false } = {}) {
-  if (!state.roomCode || state.leavingRoom) return;
-  state.leavingRoom = true;
-  const code = state.roomCode;
-  try {
-    await api("/api/rooms/leave", {
-      method: "POST",
-      body: JSON.stringify({ code }),
-    });
-  } catch (error) {
-    if (!silent) {
-      handleApiError(error);
-    }
-  } finally {
-    state.room = null;
-    state.roomCode = "";
-    els.roomCodeInput.value = "";
-    els.acceptUndoBtn.classList.add("hidden");
-    els.rejectUndoBtn.classList.add("hidden");
-    state.leavingRoom = false;
-  }
-}
-
-function leaveRoomOnUnload() {
-  if (!state.roomCode) return;
-  const payload = JSON.stringify({ code: state.roomCode });
-  const blob = new Blob([payload], { type: "application/json" });
-  navigator.sendBeacon("/api/rooms/leave", blob);
-}
 function updateInfo() {
+  syncPanels();
+
   if (state.mode === "local" && state.local) {
     els.modeLabel.textContent = "Local vs AI";
     if (state.local.winner !== "empty") {
@@ -300,11 +292,12 @@ function updateInfo() {
     renderChat(state.room.chat_messages || []);
     return;
   }
+
   els.turnTimerLabel.textContent = "None";
+  els.lastMoveLabel.textContent = "None";
+  els.roomCodeLabel.textContent = "None";
+  els.linkStateLabel.textContent = "Offline";
   renderChat([]);
-}
-function setStatus(text) {
-  els.status.textContent = text;
 }
 
 function handleApiError(error) {
@@ -315,9 +308,70 @@ function handleApiError(error) {
     els.roomCodeInput.value = "";
     els.acceptUndoBtn.classList.add("hidden");
     els.rejectUndoBtn.classList.add("hidden");
+    if (state.screen === "game" && state.mode === "room") {
+      showScreen("online-setup");
+      setSetupStatus(message);
+    }
     updateInfo();
   }
-  setStatus(message);
+  if (state.screen === "online-setup") {
+    setSetupStatus(message);
+  } else {
+    setStatus(message);
+  }
+}
+
+async function leaveRoom({ silent = false } = {}) {
+  if (!state.roomCode || state.leavingRoom) return;
+  state.leavingRoom = true;
+  const code = state.roomCode;
+  try {
+    await api("/api/rooms/leave", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  } catch (error) {
+    if (!silent) {
+      handleApiError(error);
+    }
+  } finally {
+    state.room = null;
+    state.roomCode = "";
+    els.roomCodeInput.value = "";
+    els.acceptUndoBtn.classList.add("hidden");
+    els.rejectUndoBtn.classList.add("hidden");
+    state.leavingRoom = false;
+  }
+}
+
+function leaveRoomOnUnload() {
+  if (!state.roomCode) return;
+  const payload = JSON.stringify({ code: state.roomCode });
+  const blob = new Blob([payload], { type: "application/json" });
+  navigator.sendBeacon("/api/rooms/leave", blob);
+}
+
+async function goToLanding() {
+  if (state.roomCode) {
+    await leaveRoom({ silent: true });
+  }
+  state.mode = "local";
+  state.room = null;
+  state.roomCode = "";
+  showScreen("landing");
+  setSetupStatus("Create a room or join one with a room code.");
+}
+
+async function enterLocalMode() {
+  showScreen("game");
+  state.mode = "local";
+  await startLocal();
+}
+
+function enterOnlineSetup() {
+  state.mode = "room";
+  showScreen("online-setup");
+  setSetupStatus("Create a room or join one with a room code.");
 }
 
 async function startLocal() {
@@ -332,6 +386,7 @@ async function startLocal() {
   state.local = data.state;
   state.room = null;
   state.roomCode = "";
+  showScreen("game");
   setStatus("Local game started.");
   updateInfo();
 }
@@ -357,9 +412,11 @@ async function createRoom() {
   state.room = data.room;
   state.roomCode = data.room.code;
   els.roomCodeInput.value = data.room.code;
+  showScreen("game");
   setStatus(`Room created: ${data.room.code}`);
   updateInfo();
 }
+
 async function joinRoom() {
   if (state.roomCode) {
     await leaveRoom({ silent: true });
@@ -373,6 +430,7 @@ async function joinRoom() {
   state.mode = "room";
   state.room = data.room;
   state.roomCode = data.room.code;
+  showScreen("game");
   setStatus(`Joined room: ${data.room.code}`);
   updateInfo();
 }
@@ -402,8 +460,29 @@ async function resetRoom() {
   updateInfo();
 }
 
+async function sendChat() {
+  if (!state.roomCode) {
+    return setStatus("Join or create a room first.");
+  }
+  const text = els.chatInput.value.trim();
+  if (!text) {
+    return setStatus("Message cannot be empty.");
+  }
+  const data = await api("/api/rooms/chat", {
+    method: "POST",
+    body: JSON.stringify({ code: state.roomCode, text }),
+  });
+  state.room = data.room;
+  els.chatInput.value = "";
+  setStatus("Message sent.");
+  updateInfo();
+}
+
 async function refresh() {
   try {
+    if (state.screen !== "game") {
+      return;
+    }
     if (state.mode === "local") {
       if (state.local && state.local.winner !== "empty") {
         updateInfo();
@@ -422,6 +501,7 @@ async function refresh() {
 }
 
 els.board.addEventListener("click", async (event) => {
+  if (state.screen !== "game") return;
   const rect = els.board.getBoundingClientRect();
   const scaleX = els.board.width / rect.width;
   const scaleY = els.board.height / rect.height;
@@ -463,6 +543,7 @@ els.board.addEventListener("click", async (event) => {
 });
 
 els.board.addEventListener("mousemove", (event) => {
+  if (state.screen !== "game") return;
   const rect = els.board.getBoundingClientRect();
   const scaleX = els.board.width / rect.width;
   const scaleY = els.board.height / rect.height;
@@ -473,10 +554,8 @@ els.board.addEventListener("mousemove", (event) => {
   }
   if (state.mode === "room" && state.room) {
     drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
-    renderChat(state.room.chat_messages || []);
     return;
   }
-  renderChat([]);
 });
 
 els.board.addEventListener("mouseleave", () => {
@@ -487,12 +566,13 @@ els.board.addEventListener("mouseleave", () => {
   }
   if (state.mode === "room" && state.room) {
     drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
-    renderChat(state.room.chat_messages || []);
-    return;
   }
-  renderChat([]);
 });
 
+els.goLocalBtn.addEventListener("click", () => enterLocalMode().catch(handleApiError));
+els.goOnlineBtn.addEventListener("click", enterOnlineSetup);
+els.backToHomeFromSetupBtn.addEventListener("click", () => goToLanding().catch(handleApiError));
+els.backHomeBtn.addEventListener("click", () => goToLanding().catch(handleApiError));
 els.startLocalBtn.addEventListener("click", () => startLocal().catch(handleApiError));
 els.undoLocalBtn.addEventListener("click", () => localUndo().catch(handleApiError));
 els.createRoomBtn.addEventListener("click", () => createRoom().catch(handleApiError));
@@ -512,10 +592,21 @@ els.chatInput.addEventListener("keydown", (event) => {
 window.addEventListener("pagehide", leaveRoomOnUnload);
 
 els.copyRoomBtn.addEventListener("click", async () => {
-  if (!state.roomCode) return setStatus("No room code available.");
-  await navigator.clipboard.writeText(state.roomCode);
-  setStatus(`Room code copied: ${state.roomCode}`);
+  if (!state.roomCode && !els.roomCodeInput.value.trim()) {
+    return state.screen === "online-setup"
+      ? setSetupStatus("No room code available.")
+      : setStatus("No room code available.");
+  }
+  const code = state.roomCode || els.roomCodeInput.value.trim().toUpperCase();
+  await navigator.clipboard.writeText(code);
+  if (state.screen === "online-setup") {
+    setSetupStatus(`Room code copied: ${code}`);
+  } else {
+    setStatus(`Room code copied: ${code}`);
+  }
 });
 
-startLocal().catch(handleApiError);
+showScreen("landing");
+syncPanels();
+drawBoard(Array.from({ length: SIZE }, () => Array(SIZE).fill(0)), null);
 setInterval(refresh, POLL_MS);
