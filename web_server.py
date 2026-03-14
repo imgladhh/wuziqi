@@ -34,6 +34,19 @@ def now_ts() -> int:
     return int(time.time())
 
 
+def add_room_message(room: "Room", sender: str, text: str, *, session_id: str | None = None, system: bool = False) -> None:
+    room.chat_messages.append({
+        "session_id": session_id,
+        "sender": sender,
+        "text": text[:300],
+        "timestamp": now_ts(),
+        "system": system,
+    })
+    if len(room.chat_messages) > 50:
+        room.chat_messages = room.chat_messages[-50:]
+    room.updated_at = now_ts()
+
+
 @dataclass
 class LocalGame:
     board: GameBoard = field(default_factory=GameBoard)
@@ -98,8 +111,10 @@ class GameStore:
         while code in self.rooms:
             code = room_code()
         room = Room(code=code)
+        host_name = name or "Host"
         room.players[session_id] = BLACK
-        room.names[session_id] = name or "房主"
+        room.names[session_id] = host_name
+        add_room_message(room, "System", f"Room created by {host_name}.", system=True)
         self.rooms[code] = room
         return room
 
@@ -163,7 +178,8 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
                 "sender": msg["sender"],
                 "text": msg["text"],
                 "timestamp": msg["timestamp"],
-                "from_you": msg["session_id"] == session_id,
+                "system": msg.get("system", False),
+                "from_you": msg.get("session_id") == session_id and not msg.get("system", False),
             }
             for msg in room.chat_messages[-50:]
         ],
@@ -272,7 +288,7 @@ class AppHandler(BaseHTTPRequestHandler):
         with STORE.lock:
             game = STORE.get_local(session_id)
             if game.current_turn != BLACK or not game.board.place(x, y, BLACK):
-                return self.send_json({"ok": False, "error": "当前无法落子。"}, 400, session_id)
+                return self.send_json({"ok": False, "error": "You cannot move right now."}, 400, session_id)
             game.current_turn = WHITE
             if not game.board.is_game_over:
                 ai = GomokuAI(game.depth)
@@ -305,7 +321,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_room_create(self) -> None:
         session_id = self.session_id()
         body = self.read_json()
-        name = str(body.get("name", "房主")).strip() or "房主"
+        name = str(body.get("name", "Host")).strip() or "Host"
         with STORE.lock:
             room = STORE.create_room(session_id, name)
             payload = room_state_payload(room, session_id)
@@ -315,7 +331,7 @@ class AppHandler(BaseHTTPRequestHandler):
         session_id = self.session_id()
         body = self.read_json()
         code = str(body.get("code", "")).strip().upper()
-        name = str(body.get("name", "玩家")).strip() or "玩家"
+        name = str(body.get("name", "Player")).strip() or "Player"
         with STORE.lock:
             room = STORE.get_room(code)
             if room is None:
@@ -325,7 +341,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return self.send_json({"ok": False, "error": "Room is full."}, 400, session_id)
                 room.players[session_id] = WHITE
                 room.names[session_id] = name
-                room.updated_at = now_ts()
+                add_room_message(room, "System", f"{name} joined the room.", system=True)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
@@ -370,6 +386,8 @@ class AppHandler(BaseHTTPRequestHandler):
             if session_id not in room.players:
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             room.reset()
+            actor = room.names.get(session_id, "A player")
+            add_room_message(room, "System", f"{actor} reset the board.", system=True)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
@@ -386,14 +404,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             if action == "request":
                 room.pending_undo_request = session_id
-                room.updated_at = now_ts()
+                actor = room.names.get(session_id, "A player")
+                add_room_message(room, "System", f"{actor} requested an undo.", system=True)
             elif action == "accept":
                 if room.pending_undo_request is None:
                     return self.send_json({"ok": False, "error": "There is no pending undo request."}, 400, session_id)
+                requester = room.names.get(room.pending_undo_request, "A player")
                 room.undo_round()
+                actor = room.names.get(session_id, "A player")
+                add_room_message(room, "System", f"{actor} accepted {requester}'s undo request.", system=True)
             elif action == "reject":
+                requester = room.names.get(room.pending_undo_request, "A player") if room.pending_undo_request is not None else "A player"
                 room.pending_undo_request = None
-                room.updated_at = now_ts()
+                actor = room.names.get(session_id, "A player")
+                add_room_message(room, "System", f"{actor} rejected {requester}'s undo request.", system=True)
             else:
                 return self.send_json({"ok": False, "error": "Unknown action."}, 400, session_id)
             payload = room_state_payload(room, session_id)
@@ -412,17 +436,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
             if not message_text:
                 return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
-            room.chat_messages.append(
-                {
-                    "session_id": session_id,
-                    "sender": room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY))),
-                    "text": message_text[:300],
-                    "timestamp": now_ts(),
-                }
-            )
-            if len(room.chat_messages) > 50:
-                room.chat_messages = room.chat_messages[-50:]
-            room.updated_at = now_ts()
+            sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
+            add_room_message(room, sender, message_text, session_id=session_id)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 

@@ -175,24 +175,35 @@ function renderChat(messages) {
 
   messages.forEach((msg) => {
     const item = document.createElement("div");
-    item.className = `chat-item${msg.from_you ? " self" : ""}`;
+    item.className = `chat-item${msg.system ? " system" : ""}${msg.from_you ? " self" : ""}`;
+
+    const meta = document.createElement("div");
+    meta.className = "chat-meta";
 
     const sender = document.createElement("div");
     sender.className = "chat-sender";
-    sender.textContent = msg.from_you ? `${msg.sender} (you)` : msg.sender;
+    sender.textContent = msg.system ? "System" : (msg.from_you ? `${msg.sender} (you)` : msg.sender);
+
+    const time = document.createElement("div");
+    time.className = "chat-time";
+    time.textContent = new Date((msg.timestamp || 0) * 1000).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
     const body = document.createElement("div");
     body.className = "chat-text";
     body.textContent = msg.text;
 
-    item.appendChild(sender);
+    meta.appendChild(sender);
+    meta.appendChild(time);
+    item.appendChild(meta);
     item.appendChild(body);
     els.chatMessages.appendChild(item);
   });
 
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
-
 async function sendChat() {
   if (!state.roomCode) {
     return setStatus("Join or create a room first.");

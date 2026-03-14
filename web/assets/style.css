@@ -178,3 +178,20 @@ select, input {
 .chat-input-row {
   grid-template-columns: 1fr auto;
 }
+
+.chat-item.system {
+  background: #e8edf5;
+  border-left: 3px solid #7a90b0;
+}
+
+.chat-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-time {
+  font-size: 11px;
+  color: #6b7688;
+}
