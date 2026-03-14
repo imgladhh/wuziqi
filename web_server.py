@@ -58,6 +58,7 @@ class Room:
     pending_undo_request: Optional[str] = None
     last_move: Optional[tuple[int, int, int]] = None
     updated_at: int = field(default_factory=now_ts)
+    chat_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def reset(self) -> None:
         self.board.reset()
@@ -157,6 +158,15 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
         "pending_undo_from_you": room.pending_undo_request == session_id,
         "opponent_last_move": opponent_move,
         "move_count": room.board.move_count,
+        "chat_messages": [
+            {
+                "sender": msg["sender"],
+                "text": msg["text"],
+                "timestamp": msg["timestamp"],
+                "from_you": msg["session_id"] == session_id,
+            }
+            for msg in room.chat_messages[-50:]
+        ],
     }
 
 
@@ -194,6 +204,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.handle_room_reset()
         if path == "/api/rooms/undo":
             return self.handle_room_undo()
+        if path == "/api/rooms/chat":
+            return self.handle_room_chat()
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def serve_asset(self, relative_path: str) -> None:
@@ -384,6 +396,33 @@ class AppHandler(BaseHTTPRequestHandler):
                 room.updated_at = now_ts()
             else:
                 return self.send_json({"ok": False, "error": "Unknown action."}, 400, session_id)
+            payload = room_state_payload(room, session_id)
+        self.send_json({"ok": True, "room": payload}, session_id=session_id)
+
+    def handle_room_chat(self) -> None:
+        session_id = self.session_id()
+        body = self.read_json()
+        code = str(body["code"]).upper()
+        message_text = str(body.get("text", "")).strip()
+        with STORE.lock:
+            room = STORE.get_room(code)
+            if room is None:
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
+            if session_id not in room.players:
+                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
+            if not message_text:
+                return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
+            room.chat_messages.append(
+                {
+                    "session_id": session_id,
+                    "sender": room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY))),
+                    "text": message_text[:300],
+                    "timestamp": now_ts(),
+                }
+            )
+            if len(room.chat_messages) > 50:
+                room.chat_messages = room.chat_messages[-50:]
+            room.updated_at = now_ts()
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 

@@ -33,6 +33,9 @@ const els = {
   resetRoomBtn: document.getElementById("resetRoomBtn"),
   acceptUndoBtn: document.getElementById("acceptUndoBtn"),
   rejectUndoBtn: document.getElementById("rejectUndoBtn"),
+  chatMessages: document.getElementById("chatMessages"),
+  chatInput: document.getElementById("chatInput"),
+  sendChatBtn: document.getElementById("sendChatBtn"),
 };
 
 const ctx = els.board.getContext("2d");
@@ -160,6 +163,54 @@ function formatMove(move) {
   return move ? `${move[0] + 1},${move[1] + 1}` : "None";
 }
 
+function renderChat(messages) {
+  els.chatMessages.innerHTML = "";
+  if (!messages || messages.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "chat-empty";
+    empty.textContent = "No messages yet.";
+    els.chatMessages.appendChild(empty);
+    return;
+  }
+
+  messages.forEach((msg) => {
+    const item = document.createElement("div");
+    item.className = `chat-item${msg.from_you ? " self" : ""}`;
+
+    const sender = document.createElement("div");
+    sender.className = "chat-sender";
+    sender.textContent = msg.from_you ? `${msg.sender} (you)` : msg.sender;
+
+    const body = document.createElement("div");
+    body.className = "chat-text";
+    body.textContent = msg.text;
+
+    item.appendChild(sender);
+    item.appendChild(body);
+    els.chatMessages.appendChild(item);
+  });
+
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+async function sendChat() {
+  if (!state.roomCode) {
+    return setStatus("Join or create a room first.");
+  }
+  const text = els.chatInput.value.trim();
+  if (!text) {
+    return setStatus("Message cannot be empty.");
+  }
+  const data = await api("/api/rooms/chat", {
+    method: "POST",
+    body: JSON.stringify({ code: state.roomCode, text }),
+  });
+  state.room = data.room;
+  els.chatInput.value = "";
+  setStatus("Message sent.");
+  updateInfo();
+}
+
 function updateInfo() {
   if (state.mode === "local" && state.local) {
     els.modeLabel.textContent = "Local vs AI";
@@ -173,6 +224,7 @@ function updateInfo() {
     els.roomCodeLabel.textContent = "None";
     els.linkStateLabel.textContent = "Offline";
     drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null);
+    renderChat([]);
     return;
   }
 
@@ -195,7 +247,10 @@ function updateInfo() {
     els.acceptUndoBtn.classList.toggle("hidden", !showDecision);
     els.rejectUndoBtn.classList.toggle("hidden", !showDecision);
     drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    renderChat(state.room.chat_messages || []);
+    return;
   }
+  renderChat([]);
 }
 
 function setStatus(text) {
@@ -359,7 +414,10 @@ els.board.addEventListener("mousemove", (event) => {
   }
   if (state.mode === "room" && state.room) {
     drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    renderChat(state.room.chat_messages || []);
+    return;
   }
+  renderChat([]);
 });
 
 els.board.addEventListener("mouseleave", () => {
@@ -370,7 +428,10 @@ els.board.addEventListener("mouseleave", () => {
   }
   if (state.mode === "room" && state.room) {
     drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    renderChat(state.room.chat_messages || []);
+    return;
   }
+  renderChat([]);
 });
 
 els.startLocalBtn.addEventListener("click", () => startLocal().catch(handleApiError));
@@ -381,6 +442,14 @@ els.undoRoomBtn.addEventListener("click", () => roomUndo().catch(handleApiError)
 els.resetRoomBtn.addEventListener("click", () => resetRoom().catch(handleApiError));
 els.acceptUndoBtn.addEventListener("click", () => roomUndo("accept").catch(handleApiError));
 els.rejectUndoBtn.addEventListener("click", () => roomUndo("reject").catch(handleApiError));
+els.sendChatBtn.addEventListener("click", () => sendChat().catch(handleApiError));
+els.chatInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    sendChat().catch(handleApiError);
+  }
+});
+
 els.copyRoomBtn.addEventListener("click", async () => {
   if (!state.roomCode) return setStatus("No room code available.");
   await navigator.clipboard.writeText(state.roomCode);
