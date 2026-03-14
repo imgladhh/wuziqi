@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: wuziqi-web
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python web_server.py

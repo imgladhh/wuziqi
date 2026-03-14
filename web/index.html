@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gomoku Web</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="board-shell">
+      <canvas id="board" width="620" height="620"></canvas>
+    </section>
+    <aside class="sidebar">
+      <header class="hero">
+        <p class="eyebrow">Gomoku Online</p>
+        <h1>Gomoku Web Match</h1>
+        <p id="status">Ready to play</p>
+      </header>
+
+      <section class="card">
+        <h2>Match Info</h2>
+        <div class="info-grid">
+          <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
+          <span>Turn</span><strong id="turnLabel">Your turn</strong>
+          <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
+          <span>Room code</span><strong id="roomCodeLabel">None</strong>
+          <span>Connection</span><strong id="linkStateLabel">Offline</strong>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Local Mode</h2>
+        <div class="toolbar">
+          <select id="depthSelect">
+            <option value="2">AI Depth 2</option>
+            <option value="3">AI Depth 3</option>
+          </select>
+          <button id="startLocalBtn" class="primary">Start Local Game</button>
+          <button id="undoLocalBtn">Undo Local Move</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Online Mode</h2>
+        <div class="toolbar">
+          <input id="playerNameInput" type="text" maxlength="20" placeholder="Your nickname">
+          <div class="inline">
+            <button id="createRoomBtn">Create Room</button>
+            <button id="copyRoomBtn">Copy Code</button>
+          </div>
+          <div class="inline">
+            <input id="roomCodeInput" type="text" maxlength="6" placeholder="Enter room code">
+            <button id="joinRoomBtn">Join Room</button>
+          </div>
+          <div class="inline">
+            <button id="undoRoomBtn">Request Undo</button>
+            <button id="resetRoomBtn">Reset Board</button>
+          </div>
+          <div class="inline">
+            <button id="acceptUndoBtn" class="accent hidden">Accept Undo</button>
+            <button id="rejectUndoBtn" class="danger hidden">Reject Undo</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
