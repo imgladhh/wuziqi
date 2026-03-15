@@ -277,3 +277,22 @@ select, input {
     flex-direction: column;
   }
 }
+.voice-row {
+  align-items: center;
+}
+
+.voice-status {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 0 12px;
+  background: #fffdf8;
+  border: 1px solid #d5c2a0;
+  color: #6b7688;
+  font-size: 13px;
+}
+
+.chat-text audio {
+  width: 100%;
+  margin-top: 8px;
+}

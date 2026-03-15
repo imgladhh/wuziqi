@@ -13,6 +13,10 @@ const state = {
   roomCode: "",
   hoverPoint: null,
   leavingRoom: false,
+  mediaRecorder: null,
+  voiceChunks: [],
+  voiceStartAt: 0,
+  voiceTimer: null,
 };
 
 const els = {
@@ -51,6 +55,8 @@ const els = {
   chatMessages: document.getElementById("chatMessages"),
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
+  recordVoiceBtn: null,
+  voiceStatus: null,
 };
 
 const ctx = els.board.getContext("2d");
@@ -201,7 +207,46 @@ function setSetupStatus(text) {
   els.setupStatus.textContent = text;
 }
 
+function setVoiceStatus(text) {
+  ensureVoiceControls();
+  els.voiceStatus.textContent = text;
+}
+
+function ensureVoiceControls() {
+  if (els.recordVoiceBtn && els.voiceStatus) {
+    return;
+  }
+  const toolbar = els.chatCard.querySelector(".chat-toolbar");
+  if (!toolbar) {
+    return;
+  }
+
+  const row = document.createElement("div");
+  row.className = "inline voice-row";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "recordVoiceBtn";
+  button.className = "accent";
+  button.textContent = "Record Voice";
+
+  const status = document.createElement("div");
+  status.id = "voiceStatus";
+  status.className = "voice-status";
+  status.textContent = "Up to 15 seconds per clip.";
+
+  row.appendChild(button);
+  row.appendChild(status);
+  toolbar.appendChild(row);
+
+  els.recordVoiceBtn = button;
+  els.voiceStatus = status;
+
+  button.addEventListener("click", () => toggleVoiceRecording().catch(handleApiError));
+}
+
 function renderChat(messages) {
+  ensureVoiceControls();
   els.chatMessages.innerHTML = "";
   if (!messages || messages.length === 0) {
     const empty = document.createElement("div");
@@ -231,7 +276,18 @@ function renderChat(messages) {
 
     const body = document.createElement("div");
     body.className = "chat-text";
-    body.textContent = msg.text;
+    if (msg.message_type === "voice" && msg.audio_data) {
+      const label = document.createElement("div");
+      label.textContent = msg.text || "Voice message";
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "metadata";
+      audio.src = msg.audio_data;
+      body.appendChild(label);
+      body.appendChild(audio);
+    } else {
+      body.textContent = msg.text;
+    }
 
     meta.appendChild(sender);
     meta.appendChild(time);
@@ -241,6 +297,117 @@ function renderChat(messages) {
   });
 
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Unable to read recorded audio."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function stopVoiceUi() {
+  if (state.voiceTimer) {
+    window.clearInterval(state.voiceTimer);
+    state.voiceTimer = null;
+  }
+  if (state.mediaRecorder && state.mediaRecorder.state === "recording") {
+    state.mediaRecorder.stop();
+    return;
+  }
+  if (els.recordVoiceBtn) {
+    els.recordVoiceBtn.textContent = "Record Voice";
+  }
+}
+
+async function startVoiceRecording() {
+  if (!state.roomCode) {
+    throw new Error("Join or create a room first.");
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("This browser does not support microphone recording.");
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const mimeType = typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "";
+  const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+  state.mediaRecorder = recorder;
+  state.voiceChunks = [];
+  state.voiceStartAt = Date.now();
+
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data && event.data.size > 0) {
+      state.voiceChunks.push(event.data);
+    }
+  });
+
+  recorder.addEventListener("stop", async () => {
+    const durationSeconds = Math.max(1, Math.min(15, Math.round((Date.now() - state.voiceStartAt) / 1000)));
+    const chunks = state.voiceChunks.slice();
+    state.mediaRecorder = null;
+    state.voiceChunks = [];
+    stopVoiceUi();
+    stream.getTracks().forEach((track) => track.stop());
+
+    if (chunks.length === 0) {
+      setVoiceStatus("Recording cancelled.");
+      return;
+    }
+
+    try {
+      setVoiceStatus("Uploading voice clip...");
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const audioData = await blobToDataUrl(blob);
+      const data = await api("/api/rooms/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          code: state.roomCode,
+          type: "voice",
+          audio_data: audioData,
+          mime_type: recorder.mimeType || "audio/webm",
+          duration_seconds: durationSeconds,
+        }),
+      });
+      state.room = data.room;
+      setStatus("Voice message sent.");
+      setVoiceStatus("Voice clip sent.");
+      updateInfo();
+    } catch (error) {
+      setVoiceStatus("Voice upload failed.");
+      handleApiError(error);
+    }
+  });
+
+  recorder.start();
+  if (els.recordVoiceBtn) {
+    els.recordVoiceBtn.textContent = "Stop Recording";
+  }
+  setVoiceStatus("Recording... 15s left");
+  state.voiceTimer = window.setInterval(() => {
+    const elapsed = Math.floor((Date.now() - state.voiceStartAt) / 1000);
+    const left = Math.max(0, 15 - elapsed);
+    setVoiceStatus(`Recording... ${left}s left`);
+    if (left <= 0 && state.mediaRecorder && state.mediaRecorder.state === "recording") {
+      state.mediaRecorder.stop();
+    }
+  }, 250);
+}
+
+async function toggleVoiceRecording() {
+  ensureVoiceControls();
+  if (typeof MediaRecorder === "undefined") {
+    throw new Error("This browser does not support voice recording.");
+  }
+  if (state.mediaRecorder && state.mediaRecorder.state === "recording") {
+    state.mediaRecorder.stop();
+    return;
+  }
+  await startVoiceRecording();
 }
 
 function updateInfo() {
@@ -322,6 +489,7 @@ function handleApiError(error) {
 }
 
 async function leaveRoom({ silent = false } = {}) {
+  stopVoiceUi();
   if (!state.roomCode || state.leavingRoom) return;
   state.leavingRoom = true;
   const code = state.roomCode;
@@ -345,6 +513,7 @@ async function leaveRoom({ silent = false } = {}) {
 }
 
 function leaveRoomOnUnload() {
+  stopVoiceUi();
   if (!state.roomCode) return;
   const payload = JSON.stringify({ code: state.roomCode });
   const blob = new Blob([payload], { type: "application/json" });
@@ -352,6 +521,7 @@ function leaveRoomOnUnload() {
 }
 
 async function goToLanding() {
+  stopVoiceUi();
   if (state.roomCode) {
     await leaveRoom({ silent: true });
   }
@@ -608,5 +778,6 @@ els.copyRoomBtn.addEventListener("click", async () => {
 
 showScreen("landing");
 syncPanels();
+ensureVoiceControls();
 drawBoard(Array.from({ length: SIZE }, () => Array(SIZE).fill(0)), null);
 setInterval(refresh, POLL_MS);

@@ -35,13 +35,28 @@ def now_ts() -> int:
     return int(time.time())
 
 
-def add_room_message(room: "Room", sender: str, text: str, *, session_id: str | None = None, system: bool = False) -> None:
+def add_room_message(
+    room: "Room",
+    sender: str,
+    text: str,
+    *,
+    session_id: str | None = None,
+    system: bool = False,
+    message_type: str = "text",
+    audio_data: str = "",
+    mime_type: str = "",
+    duration_seconds: int = 0,
+) -> None:
     room.chat_messages.append({
         "session_id": session_id,
         "sender": sender,
         "text": text[:300],
         "timestamp": now_ts(),
         "system": system,
+        "message_type": message_type,
+        "audio_data": audio_data,
+        "mime_type": mime_type,
+        "duration_seconds": duration_seconds,
     })
     if len(room.chat_messages) > 50:
         room.chat_messages = room.chat_messages[-50:]
@@ -241,6 +256,10 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
                 "text": msg["text"],
                 "timestamp": msg["timestamp"],
                 "system": msg.get("system", False),
+                "message_type": msg.get("message_type", "text"),
+                "audio_data": msg.get("audio_data", ""),
+                "mime_type": msg.get("mime_type", ""),
+                "duration_seconds": msg.get("duration_seconds", 0),
                 "from_you": msg.get("session_id") == session_id and not msg.get("system", False),
             }
             for msg in room.chat_messages[-50:]
@@ -502,17 +521,38 @@ class AppHandler(BaseHTTPRequestHandler):
         session_id = self.session_id()
         body = self.read_json()
         code = str(body["code"]).upper()
+        message_type = str(body.get("type", "text")).strip().lower() or "text"
         message_text = str(body.get("text", "")).strip()
+        audio_data = str(body.get("audio_data", "")).strip()
+        mime_type = str(body.get("mime_type", "")).strip()
+        duration_seconds = int(body.get("duration_seconds", 0))
         with STORE.lock:
             room = STORE.get_room(code)
             if room is None:
                 return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
             if session_id not in room.players:
                 return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            if not message_text:
-                return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
             sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
-            add_room_message(room, sender, message_text, session_id=session_id)
+            if message_type == "voice":
+                if not audio_data or not audio_data.startswith("data:audio/"):
+                    return self.send_json({"ok": False, "error": "Voice message data is invalid."}, 400, session_id)
+                if len(audio_data) > 1_500_000:
+                    return self.send_json({"ok": False, "error": "Voice message is too large."}, 400, session_id)
+                duration_seconds = max(1, min(15, duration_seconds or 1))
+                add_room_message(
+                    room,
+                    sender,
+                    f"Voice message ({duration_seconds}s)",
+                    session_id=session_id,
+                    message_type="voice",
+                    audio_data=audio_data,
+                    mime_type=mime_type[:80],
+                    duration_seconds=duration_seconds,
+                )
+            else:
+                if not message_text:
+                    return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
+                add_room_message(room, sender, message_text, session_id=session_id)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
