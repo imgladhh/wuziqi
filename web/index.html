@@ -1,63 +1,84 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gomoku Web</title>
+  <title>&#20116;&#23376;&#26827;&#32852;&#26426;</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <main id="landingScreen" class="landing-screen">
     <section class="landing-shell">
-      <p class="eyebrow">Gomoku Online</p>
-      <h1>Choose Your Mode</h1>
-      <p class="landing-copy">Start a local AI match or head into an online room with a cleaner game-first layout.</p>
+      <p class="eyebrow">&#20116;&#23376;&#26827;&#32852;&#26426;</p>
+      <h1>&#36873;&#25321;&#27169;&#24335;</h1>
+      <p class="landing-copy">&#24320;&#22987;&#26412;&#22320;&#20154;&#26426;&#23545;&#23616;&#65292;&#25110;&#32773;&#36827;&#20837;&#32852;&#26426;&#25151;&#38388;&#21644;&#26379;&#21451;&#23545;&#25112;&#12290;</p>
       <div class="landing-grid">
         <button id="goLocalBtn" class="mode-card mode-local">
-          <span class="mode-title">Local Mode</span>
-          <span class="mode-subtitle">Play against the minimax AI on this device.</span>
+          <span class="mode-title">&#26412;&#22320;&#27169;&#24335;</span>
+          <span class="mode-subtitle">&#22312;&#24403;&#21069;&#35774;&#22791;&#19978;&#19982; minimax AI &#23545;&#25112;&#12290;</span>
         </button>
         <button id="goOnlineBtn" class="mode-card mode-online">
-          <span class="mode-title">Online Mode</span>
-          <span class="mode-subtitle">Create or join a room and play with chat.</span>
+          <span class="mode-title">&#32852;&#26426;&#27169;&#24335;</span>
+          <span class="mode-subtitle">&#21019;&#24314;&#25110;&#21152;&#20837;&#25151;&#38388;&#65292;&#24182;&#22312;&#23545;&#23616;&#20013;&#32842;&#22825;&#12290;</span>
         </button>
       </div>
     </section>
   </main>
-
   <main id="onlineSetupScreen" class="setup-screen hidden">
-    <section class="setup-shell">
+    <section class="setup-shell online-shell">
       <header class="setup-header">
-        <button id="backToHomeFromSetupBtn" class="ghost-btn">Back</button>
+        <button id="backToHomeFromSetupBtn" class="ghost-btn">&#36820;&#22238;</button>
         <div>
-          <p class="eyebrow">Online Lobby</p>
-          <h1>Enter An Online Room</h1>
+          <p class="eyebrow">&#32852;&#26426;&#22823;&#21381;</p>
+          <h1>&#21019;&#24314;&#25110;&#21152;&#20837;&#25151;&#38388;</h1>
         </div>
       </header>
-      <section class="card setup-card">
-        <div class="toolbar">
-          <input id="playerNameInput" type="text" maxlength="20" placeholder="Your nickname">
+      <section class="online-grid">
+        <section class="card online-card online-entry-card">
+          <h2>&#22823;&#21381;&#20837;&#21475;</h2>
+          <label class="field-label" for="playerNameInput">&#20320;&#30340;&#26165;&#31216;</label>
+          <input id="playerNameInput" type="text" maxlength="20" placeholder="&#36755;&#20837;&#26165;&#31216;">
+          <label class="field-label" for="turnLimitSelect">&#27599;&#25163;&#26102;&#38480;</label>
           <select id="turnLimitSelect">
-            <option value="20">20s per move</option>
-            <option value="30" selected>30s per move</option>
-            <option value="45">45s per move</option>
-            <option value="60">60s per move</option>
-            <option value="90">90s per move</option>
+            <option value="20">20 &#31186;&#27599;&#25163;</option>
+            <option value="30" selected>30 &#31186;&#27599;&#25163;</option>
+            <option value="45">45 &#31186;&#27599;&#25163;</option>
+            <option value="60">60 &#31186;&#27599;&#25163;</option>
+            <option value="90">90 &#31186;&#27599;&#25163;</option>
           </select>
-          <div class="inline">
-            <button id="createRoomBtn">Create Room</button>
-            <button id="copyRoomBtn">Copy Code</button>
+          <div class="entry-actions">
+            <button id="createRoomBtn" class="primary">&#21019;&#24314;&#25151;&#38388;</button>
           </div>
-          <div class="inline">
-            <input id="roomCodeInput" type="text" maxlength="6" placeholder="Enter room code">
-            <button id="joinRoomBtn">Join Room</button>
+          <div class="join-row">
+            <input id="roomCodeInput" type="text" maxlength="6" placeholder="&#36755;&#20837;&#25151;&#38388;&#30721;">
+            <button id="joinRoomBtn">&#21152;&#20837;&#25151;&#38388;</button>
           </div>
-          <p id="setupStatus" class="setup-status">Create a room or join one with a room code.</p>
-        </div>
+          <div class="online-note">&#20320;&#21487;&#20197;&#21019;&#24314;&#25151;&#38388;&#36992;&#35831;&#26379;&#21451;&#65292;&#20063;&#21487;&#20197;&#36755;&#20837;&#25151;&#38388;&#30721;&#30452;&#25509;&#21152;&#20837;&#12290;</div>
+          <p id="setupStatus" class="setup-status">&#21019;&#24314;&#25151;&#38388;&#25110;&#36755;&#20837;&#25151;&#38388;&#30721;&#21152;&#20837;&#12290;</p>
+        </section>
+        <section class="card online-card online-room-card">
+          <div class="online-room-head">
+            <div>
+              <h2>&#25151;&#38388;&#20449;&#24687;</h2>
+              <div id="roomStatusText" class="muted-text">&#24403;&#21069;&#36824;&#27809;&#26377;&#21152;&#20837;&#25151;&#38388;&#12290;</div>
+            </div>
+            <div class="room-head-actions">
+              <button id="enterCreatedRoomBtn" class="primary" disabled>&#36827;&#20837;&#23545;&#23616;</button>
+              <button id="leaveSetupRoomBtn" disabled>&#31163;&#24320;&#25151;&#38388;</button>
+            </div>
+          </div>
+          <div class="room-code-row">
+            <div id="roomCodePill" class="room-code-pill hidden">&#25151;&#38388;&#30721; ------</div>
+            <button id="copyCreatedRoomBtn" class="hidden accent">&#22797;&#21046;&#25151;&#38388;&#30721;</button>
+          </div>
+          <div class="room-section">
+            <h3>&#25151;&#38388;&#29609;&#23478;</h3>
+            <div id="roomPlayerList" class="room-player-list"></div>
+          </div>
+        </section>
       </section>
     </section>
   </main>
-
   <main id="gameScreen" class="app hidden">
     <section class="board-shell">
       <canvas id="board" width="620" height="620"></canvas>
@@ -66,68 +87,62 @@
       <header class="hero">
         <div class="hero-top">
           <div>
-            <p class="eyebrow">Gomoku Match</p>
-            <h1>Board View</h1>
+            <p class="eyebrow">&#20116;&#23376;&#26827;&#23545;&#23616;</p>
+            <h1>&#26827;&#30424;&#30028;&#38754;</h1>
           </div>
-          <button id="backHomeBtn" class="ghost-btn">Home</button>
+          <button id="backHomeBtn" class="ghost-btn">&#36820;&#22238;&#39318;&#39029;</button>
         </div>
-        <p id="status">Ready to play</p>
+        <p id="status">&#20934;&#22791;&#24320;&#22987;</p>
       </header>
-
       <section class="card">
-        <h2>Match Info</h2>
-        <div id="roomBadge" class="room-badge hidden">
-          <div>
-            <span class="room-badge-label">Share room code</span>
-            <strong id="roomBadgeCode">------</strong>
-          </div>
-          <button id="copyRoomBadgeBtn" class="accent">Copy</button>
-        </div>
+        <h2>&#23545;&#23616;&#20449;&#24687;</h2>
         <div class="info-grid">
-          <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
-          <span>Turn</span><strong id="turnLabel">Your turn</strong>
-          <span>Move timer</span><strong id="turnTimerLabel">None</strong>
-          <span>AI hint</span><strong id="hintUsageLabel">None</strong>
-          <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
-          <span>Room code</span><strong id="roomCodeLabel">None</strong>
-          <span>Connection</span><strong id="linkStateLabel">Offline</strong>
+          <span>&#27169;&#24335;</span><strong id="modeLabel">&#26412;&#22320;&#20154;&#26426;</strong>
+          <span>&#24403;&#21069;&#22238;&#21512;</span><strong id="turnLabel">&#20320;&#22238;&#21512;</strong>
+          <span>&#27599;&#25163;&#35835;&#31186;</span><strong id="turnTimerLabel">&#26080;</strong>
+          <span>AI &#25552;&#31034;</span><strong id="hintUsageLabel">&#26080;</strong>
+          <span>&#23545;&#26041;&#19978;&#19968;&#25163;</span><strong id="lastMoveLabel">&#26080;</strong>
+          <span>&#36830;&#25509;&#29366;&#24577;</span><strong id="linkStateLabel">&#26410;&#36830;&#25509;</strong>
         </div>
       </section>
-
       <section class="card">
-        <h2>Actions</h2>
+        <h2>&#25805;&#20316;&#21306;</h2>
         <div id="localActions" class="toolbar hidden">
           <select id="depthSelect">
-            <option value="2">AI Depth 2</option>
-            <option value="3">AI Depth 3</option>
+            <option value="2">AI &#28145;&#24230; 2</option>
+            <option value="3">AI &#28145;&#24230; 3</option>
           </select>
-          <button id="startLocalBtn" class="primary">Restart Local Game</button>
-          <button id="undoLocalBtn">Undo Local Move</button>
+          <button id="startLocalBtn" class="primary">&#37325;&#26032;&#24320;&#22987;&#26412;&#22320;&#23545;&#23616;</button>
+          <button id="undoLocalBtn">&#26412;&#22320;&#24724;&#26827;</button>
         </div>
         <div id="onlineActions" class="toolbar hidden">
           <div class="inline">
-            <button id="hintRoomBtn" class="accent">Use AI Hint</button>
-            <button id="undoRoomBtn">Request Undo</button>
+            <button id="hintRoomBtn" class="accent">&#20351;&#29992; AI &#25552;&#31034;</button>
+            <button id="undoRoomBtn">&#35831;&#27714;&#24724;&#26827;</button>
           </div>
           <div class="inline">
-            <button id="resetRoomBtn">Reset Board</button>
-            <button id="acceptUndoBtn" class="accent hidden">Accept Undo</button>
-            <button id="rejectUndoBtn" class="danger hidden">Reject Undo</button>
+            <button id="resetRoomBtn">&#37325;&#24320;&#26827;&#23616;</button>
+            <button id="acceptUndoBtn" class="accent hidden">&#21516;&#24847;&#24724;&#26827;</button>
+            <button id="rejectUndoBtn" class="danger hidden">&#25298;&#32477;&#24724;&#26827;</button>
           </div>
           <div id="hintPanel" class="hint-panel hidden">
-            <strong id="hintMoveLabel">Suggested move: None</strong>
-            <p id="hintReasonLabel">Use your one-time hint to get an AI-recommended move and reason.</p>
+            <strong id="hintMoveLabel">&#25512;&#33616;&#33853;&#28857;&#65306;&#26080;</strong>
+            <p id="hintReasonLabel">&#20320;&#21487;&#20197;&#20351;&#29992;&#26412;&#23616;&#21807;&#19968;&#19968;&#27425; AI &#25552;&#31034;&#26469;&#33719;&#21462;&#25512;&#33616;&#33853;&#28857;&#21644;&#29702;&#30001;&#12290;</p>
           </div>
         </div>
       </section>
-
-      <section id="chatCard" class="card hidden">
-        <h2>Room Chat</h2>
+      <section id="chatCard" class="card hidden online-game-chat">
+        <div class="online-room-head">
+          <div>
+            <h2>&#25151;&#38388;&#32842;&#22825;</h2>
+            <div class="muted-text">&#23545;&#23616;&#36807;&#31243;&#20013;&#21487;&#20197;&#23454;&#26102;&#32842;&#22825;&#12290;</div>
+          </div>
+        </div>
         <div class="toolbar chat-toolbar">
           <div id="chatMessages" class="chat-messages"></div>
           <div class="inline chat-input-row">
-            <input id="chatInput" type="text" maxlength="300" placeholder="Type a message">
-            <button id="sendChatBtn">Send</button>
+            <input id="chatInput" type="text" maxlength="300" placeholder="&#36755;&#20837;&#32842;&#22825;&#20869;&#23481;">
+            <button id="sendChatBtn">&#21457;&#36865;</button>
           </div>
         </div>
       </section>

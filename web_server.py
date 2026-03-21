@@ -130,9 +130,9 @@ def apply_room_timeout(room: "Room") -> None:
     room.timeout_winner = winner_stone
     room.pending_undo_request = None
     clear_hint_pause(room)
-    loser_name = room.names.get(session_for_stone(room, loser_stone) or "", "A player")
-    winner_name = room.names.get(session_for_stone(room, winner_stone) or "", "A player")
-    add_room_message(room, "System", f"{loser_name} ran out of time. {winner_name} wins on time.", system=True)
+    loser_name = room.names.get(session_for_stone(room, loser_stone) or "", "\u73a9\u5bb6")
+    winner_name = room.names.get(session_for_stone(room, winner_stone) or "", "\u73a9\u5bb6")
+    add_room_message(room, "\u7cfb\u7edf", f"{loser_name} \u8d85\u65f6\u672a\u843d\u5b50\uff0c{winner_name} \u901a\u8fc7\u8d85\u65f6\u83b7\u80dc\u3002", system=True)
 
 
 @dataclass
@@ -155,6 +155,7 @@ class Room:
     board: GameBoard = field(default_factory=GameBoard)
     players: Dict[str, int] = field(default_factory=dict)
     names: Dict[str, str] = field(default_factory=dict)
+    host_session_id: str = ""
     current_turn: int = BLACK
     pending_undo_request: Optional[str] = None
     last_move: Optional[tuple[int, int, int]] = None
@@ -168,6 +169,7 @@ class Room:
     hint_pause_session: Optional[str] = None
     hint_pause_until: int = 0
     hint_pause_time_left: int = 0
+    match_entered: bool = False
 
     def reset(self) -> None:
         self.board.reset()
@@ -179,6 +181,7 @@ class Room:
         self.hints_used.clear()
         self.hint_details.clear()
         clear_hint_pause(self)
+        self.match_entered = False
         self.updated_at = now_ts()
 
     def undo_round(self) -> int:
@@ -216,11 +219,11 @@ class GameStore:
         code = room_code()
         while code in self.rooms:
             code = room_code()
-        room = Room(code=code, turn_limit_seconds=turn_limit_seconds)
-        host_name = name or "Host"
+        room = Room(code=code, turn_limit_seconds=turn_limit_seconds, host_session_id=session_id)
+        host_name = name or "\u623f\u4e3b"
         room.players[session_id] = BLACK
         room.names[session_id] = host_name
-        add_room_message(room, "System", f"Room created by {host_name}.", system=True)
+        add_room_message(room, "\u7cfb\u7edf", f"{host_name} \u521b\u5efa\u4e86\u623f\u95f4\u3002", system=True)
         self.rooms[code] = room
         return room
 
@@ -292,6 +295,8 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
         "win_reason": room_win_reason(room),
         "current_turn": stone_name(room.current_turn),
         "your_stone": stone_name(your_stone),
+        "is_host": session_id == room.host_session_id,
+        "match_entered": room.match_entered,
         "your_turn": your_stone != EMPTY and room.current_turn == your_stone and room_winner(room) == EMPTY,
         "players": {
             stone_name(stone): room.names[sid]
@@ -347,9 +352,8 @@ def json_response(payload: dict[str, Any], session_id: str, status: int = 200) -
 
 
 async def index(_request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(STATIC_DIR / "index.html")
-
-
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
 async def local_new(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
@@ -375,7 +379,7 @@ async def local_move(request: web.Request) -> web.Response:
     with STORE.lock:
         game = STORE.get_local(session_id)
         if game.current_turn != BLACK or not game.board.place(x, y, BLACK):
-            return json_response({"ok": False, "error": "You cannot move right now."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         game.current_turn = WHITE
         if not game.board.is_game_over:
             ai = GomokuAI(game.depth)
@@ -410,7 +414,7 @@ async def local_undo(request: web.Request) -> web.Response:
 async def create_room(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
-    name = str(body.get("name", "Host")).strip() or "Host"
+    name = str(body.get("name", "\u623f\u4e3b")).strip() or "\u623f\u4e3b"
     turn_limit_seconds = int(body.get("turn_limit_seconds", DEFAULT_ROOM_TURN_LIMIT_SECONDS))
     turn_limit_seconds = max(10, min(300, turn_limit_seconds))
     with STORE.lock:
@@ -424,18 +428,18 @@ async def join_room(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
     code = str(body.get("code", "")).strip().upper()
-    name = str(body.get("name", "Player")).strip() or "Player"
+    name = str(body.get("name", "\u73a9\u5bb6")).strip() or "\u73a9\u5bb6"
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         if session_id not in room.players:
             if len(room.players) >= 2:
-                return json_response({"ok": False, "error": "Room is full."}, session_id, 400)
+                return json_response({"ok": False, "error": "\u623f\u95f4\u5df2\u6ee1\u3002"}, session_id, 400)
             room.players[session_id] = BLACK if BLACK not in room.players.values() else WHITE
             room.names[session_id] = name
             room.turn_started_at = now_ts()
-            add_room_message(room, "System", f"{name} joined the room.", system=True)
+            add_room_message(room, "\u7cfb\u7edf", f"{name} \u52a0\u5165\u4e86\u623f\u95f4\u3002", system=True)
         payload = room_state_payload(room, session_id)
     await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -447,8 +451,31 @@ async def room_state(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         payload = room_state_payload(room, session_id)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_enter_match(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
+        if session_id not in room.players:
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
+        if session_id != room.host_session_id:
+            return json_response({"ok": False, "error": "\u53ea\u6709\u623f\u4e3b\u53ef\u4ee5\u5f00\u59cb\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 403)
+        if len(room.players) < 2:
+            return json_response({"ok": False, "error": "\u9700\u8981\u4e24\u540d\u73a9\u5bb6\u90fd\u52a0\u5165\u540e\u624d\u80fd\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
+        room.match_entered = True
+        room.updated_at = now_ts()
+        actor = room.names.get(session_id, "\u623f\u4e3b")
+        add_room_message(room, "\u7cfb\u7edf", f"{actor} \u5df2\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002", system=True)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
 
 
@@ -460,15 +487,17 @@ async def room_move(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         apply_room_timeout(room)
         stone = room.players.get(session_id, EMPTY)
         if stone == EMPTY:
-            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
+        if not room.match_entered:
+            return json_response({"ok": False, "error": "\u623f\u4e3b\u8fd8\u6ca1\u6709\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
         if room_winner(room) != EMPTY:
-            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if room.current_turn != stone or not room.board.place(x, y, stone):
-            return json_response({"ok": False, "error": "You cannot move right now."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         room.current_turn = opponent(stone)
         room.last_move = (x, y, stone)
         room.turn_started_at = now_ts()
@@ -488,12 +517,12 @@ async def room_reset(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         if session_id not in room.players:
-            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         room.reset()
-        actor = room.names.get(session_id, "A player")
-        add_room_message(room, "System", f"{actor} reset the board.", system=True)
+        actor = room.names.get(session_id, "\u73a9\u5bb6")
+        add_room_message(room, "\u7cfb\u7edf", f"{actor} \u91cd\u5f00\u4e86\u68cb\u5c40\u3002", system=True)
         payload = room_state_payload(room, session_id)
     await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -507,30 +536,30 @@ async def room_undo(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         if session_id not in room.players:
-            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         apply_room_timeout(room)
         if room_winner(room) != EMPTY:
-            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if action == "request":
             room.pending_undo_request = session_id
-            actor = room.names.get(session_id, "A player")
-            add_room_message(room, "System", f"{actor} requested an undo.", system=True)
+            actor = room.names.get(session_id, "\u73a9\u5bb6")
+            add_room_message(room, "\u7cfb\u7edf", f"{actor} \u8bf7\u6c42\u6094\u68cb\u3002", system=True)
         elif action == "accept":
             if room.pending_undo_request is None:
-                return json_response({"ok": False, "error": "There is no pending undo request."}, session_id, 400)
-            requester = room.names.get(room.pending_undo_request, "A player")
+                return json_response({"ok": False, "error": "\u5f53\u524d\u6ca1\u6709\u5f85\u5904\u7406\u7684\u6094\u68cb\u8bf7\u6c42\u3002"}, session_id, 400)
+            requester = room.names.get(room.pending_undo_request, "\u73a9\u5bb6")
             room.undo_round()
-            actor = room.names.get(session_id, "A player")
-            add_room_message(room, "System", f"{actor} accepted {requester}'s undo request.", system=True)
+            actor = room.names.get(session_id, "\u73a9\u5bb6")
+            add_room_message(room, "\u7cfb\u7edf", f"{actor} \u540c\u610f\u4e86 {requester} \u7684\u6094\u68cb\u8bf7\u6c42\u3002", system=True)
         elif action == "reject":
-            requester = room.names.get(room.pending_undo_request, "A player") if room.pending_undo_request is not None else "A player"
+            requester = room.names.get(room.pending_undo_request, "\u73a9\u5bb6") if room.pending_undo_request is not None else "\u73a9\u5bb6"
             room.pending_undo_request = None
-            actor = room.names.get(session_id, "A player")
-            add_room_message(room, "System", f"{actor} rejected {requester}'s undo request.", system=True)
+            actor = room.names.get(session_id, "\u73a9\u5bb6")
+            add_room_message(room, "\u7cfb\u7edf", f"{actor} \u62d2\u7edd\u4e86 {requester} \u7684\u6094\u68cb\u8bf7\u6c42\u3002", system=True)
         else:
-            return json_response({"ok": False, "error": "Unknown action."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u672a\u77e5\u64cd\u4f5c\u3002"}, session_id, 400)
         payload = room_state_payload(room, session_id)
     await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -543,18 +572,20 @@ async def room_hint(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         sync_room_hint_pause(room)
         apply_room_timeout(room)
         stone = room.players.get(session_id, EMPTY)
         if stone == EMPTY:
-            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
+        if not room.match_entered:
+            return json_response({"ok": False, "error": "\u623f\u4e3b\u8fd8\u6ca1\u6709\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
         if room_winner(room) != EMPTY:
-            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if room.current_turn != stone:
-            return json_response({"ok": False, "error": "You can only request a hint on your turn."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u53ea\u80fd\u5728\u4f60\u7684\u56de\u5408\u8bf7\u6c42\u63d0\u793a\u3002"}, session_id, 400)
         if session_id in room.hints_used:
-            return json_response({"ok": False, "error": "You have already used your AI hint in this game."}, session_id, 400)
+            return json_response({"ok": False, "error": "\u4f60\u672c\u5c40\u5df2\u7ecf\u4f7f\u7528\u8fc7 AI \u63d0\u793a\u3002"}, session_id, 400)
         remaining_before_pause = room_time_left(room)
         ai = GomokuAI(depth=3)
         move, reason = ai.suggest_move(room.board, stone)
@@ -566,8 +597,8 @@ async def room_hint(request: web.Request) -> web.Response:
         room.hint_pause_session = session_id
         room.hint_pause_time_left = remaining_before_pause
         room.hint_pause_until = now_ts() + ROOM_HINT_PAUSE_SECONDS
-        actor = room.names.get(session_id, "A player")
-        add_room_message(room, "System", f"{actor} used their one-time AI hint.", system=True)
+        actor = room.names.get(session_id, "\u73a9\u5bb6")
+        add_room_message(room, "\u7cfb\u7edf", f"{actor} \u4f7f\u7528\u4e86\u672c\u5c40\u552f\u4e00\u4e00\u6b21 AI \u63d0\u793a\u3002", system=True)
         payload = room_state_payload(room, session_id)
     await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -585,20 +616,20 @@ async def room_chat(request: web.Request) -> web.Response:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+            return json_response({"ok": False, "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}, session_id, 404)
         if session_id not in room.players:
-            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+            return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
         if message_type == "voice":
             if not audio_data or not audio_data.startswith("data:audio/"):
-                return json_response({"ok": False, "error": "Voice message data is invalid."}, session_id, 400)
+                return json_response({"ok": False, "error": "\u8bed\u97f3\u6d88\u606f\u6570\u636e\u65e0\u6548\u3002"}, session_id, 400)
             if len(audio_data) > 1_500_000:
-                return json_response({"ok": False, "error": "Voice message is too large."}, session_id, 400)
+                return json_response({"ok": False, "error": "\u8bed\u97f3\u6d88\u606f\u8fc7\u5927\u3002"}, session_id, 400)
             duration_seconds = max(1, min(15, duration_seconds or 1))
             add_room_message(
                 room,
                 sender,
-                f"Voice message ({duration_seconds}s)",
+                f"\u8bed\u97f3\u6d88\u606f\uff08{duration_seconds} \u79d2\uff09",
                 session_id=session_id,
                 message_type="voice",
                 audio_data=audio_data,
@@ -607,7 +638,7 @@ async def room_chat(request: web.Request) -> web.Response:
             )
         else:
             if not message_text:
-                return json_response({"ok": False, "error": "Message cannot be empty."}, session_id, 400)
+                return json_response({"ok": False, "error": "\u6d88\u606f\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002"}, session_id, 400)
             add_room_message(room, sender, message_text, session_id=session_id)
         payload = room_state_payload(room, session_id)
     await broadcast_room(code)
@@ -623,7 +654,7 @@ async def room_leave(request: web.Request) -> web.Response:
         if room is None:
             return json_response({"ok": True, "room": None}, session_id)
         stone = room.players.pop(session_id, EMPTY)
-        actor = room.names.pop(session_id, "A player")
+        actor = room.names.pop(session_id, "\u73a9\u5bb6")
         if stone == EMPTY:
             payload = room_state_payload(room, session_id) if room.code in STORE.rooms else None
             return json_response({"ok": True, "room": payload}, session_id)
@@ -636,8 +667,13 @@ async def room_leave(request: web.Request) -> web.Response:
             STORE.remove_room(code)
             payload = None
         else:
+            if room.host_session_id == session_id:
+                room.host_session_id = next(iter(room.players.keys()))
+                new_host = room.names.get(room.host_session_id, "\u73a9\u5bb6")
+                add_room_message(room, "\u7cfb\u7edf", f"{new_host} \u73b0\u5728\u6210\u4e3a\u65b0\u7684\u623f\u4e3b\u3002", system=True)
+            room.match_entered = False
             room.turn_started_at = now_ts()
-            add_room_message(room, "System", f"{actor} left the room.", system=True)
+            add_room_message(room, "\u7cfb\u7edf", f"{actor} \u79bb\u5f00\u4e86\u623f\u95f4\u3002", system=True)
             payload = room_state_payload(room, session_id)
     await broadcast_room(code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -652,11 +688,11 @@ async def websocket_room(request: web.Request) -> web.StreamResponse:
     with STORE.lock:
         room = STORE.get_room(code)
         if room is None:
-            await ws.send_json({"type": "room_closed", "error": "Room not found or expired."})
+            await ws.send_json({"type": "room_closed", "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"})
             await ws.close()
             return ws
         if session_id not in room.players:
-            await ws.send_json({"type": "room_closed", "error": "You are not in this room."})
+            await ws.send_json({"type": "room_closed", "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"})
             await ws.close()
             return ws
         STORE.register_ws(code, ws, session_id)
@@ -682,7 +718,7 @@ async def broadcast_room(code: str) -> None:
         room = STORE.get_room(code)
         clients = STORE.room_client_items(code)
         if room is None:
-            payloads = [(ws, {"type": "room_closed", "error": "Room not found or expired."}) for ws, _sid in clients]
+            payloads = [(ws, {"type": "room_closed", "error": "\u623f\u95f4\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f\u3002"}) for ws, _sid in clients]
         else:
             payloads = [(ws, {"type": "room_state", "room": room_state_payload(room, sid)}) for ws, sid in clients]
 
@@ -738,6 +774,7 @@ app.router.add_post("/api/local/move", local_move)
 app.router.add_post("/api/local/undo", local_undo)
 app.router.add_post("/api/rooms/create", create_room)
 app.router.add_post("/api/rooms/join", join_room)
+app.router.add_post("/api/rooms/enter", room_enter_match)
 app.router.add_post("/api/rooms/move", room_move)
 app.router.add_post("/api/rooms/reset", room_reset)
 app.router.add_post("/api/rooms/undo", room_undo)
