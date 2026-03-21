@@ -464,13 +464,13 @@ class GomokuAI:
         wins_now = board.winner == stone
         board.remove(move.x, move.y)
         if wins_now:
-            return "This move completes five in a row immediately, so it wins on the spot."
+            return "这一手会立刻连成五子，可以当场取胜。"
 
         board.place(move.x, move.y, enemy)
         blocks_loss = board.winner == enemy
         board.remove(move.x, move.y)
         if blocks_loss:
-            return "This move blocks the opponent's immediate winning threat and keeps the game alive."
+            return "这一手挡住了对手的直接制胜点，必须先防守。"
 
         board.place(move.x, move.y, stone)
         longest_line = 1
@@ -484,9 +484,9 @@ class GomokuAI:
         board.remove(move.x, move.y)
 
         if creates_major_threat:
-            return "This move creates a forcing attack, likely an open three or open four, so the opponent must respond."
+            return "这一手会形成强制进攻，通常是活三或活四，对手必须应对。"
         if longest_line >= 4:
-            return "This move extends your strongest chain to four stones and sets up a near-term winning threat."
+            return "这一手把你的主攻线扩展到四子，下一步就会形成很强的胜势。"
         if longest_line == 3 and best_open_ends >= 1:
-            return "This move strengthens your main line to three stones with room to grow on the next turns."
-        return "This move improves board control, supports nearby stones, and keeps the strongest follow-up options open."
+            return "这一手把主攻方向推进到三子，并且后续还有继续延展的空间。"
+        return "这一手能提升棋盘控制力，呼应附近棋子，并保留更强的后续变化。"
