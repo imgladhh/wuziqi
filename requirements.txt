@@ -1,1 +1,1 @@
-# No third-party dependencies are required for this project.
+aiohttp>=3.10,<4

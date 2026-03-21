@@ -17,6 +17,9 @@ const state = {
   voiceChunks: [],
   voiceStartAt: 0,
   voiceTimer: null,
+  roomSocket: null,
+  roomSocketReconnect: null,
+  suppressSocketReconnect: false,
 };
 
 const els = {
@@ -79,6 +82,94 @@ async function api(path, options = {}) {
     throw new Error(data.error || "Request failed.");
   }
   return data;
+}
+
+function roomSocketOpen() {
+  return typeof WebSocket !== "undefined" && Boolean(state.roomSocket && state.roomSocket.readyState === WebSocket.OPEN);
+}
+
+function disconnectRoomSocket({ suppressReconnect = true } = {}) {
+  state.suppressSocketReconnect = suppressReconnect;
+  if (state.roomSocketReconnect) {
+    window.clearTimeout(state.roomSocketReconnect);
+    state.roomSocketReconnect = null;
+  }
+  if (!state.roomSocket) {
+    return;
+  }
+  const socket = state.roomSocket;
+  state.roomSocket = null;
+  try {
+    socket.close();
+  } catch (_error) {
+    // ignore close failures
+  }
+}
+
+function scheduleRoomSocketReconnect() {
+  if (state.suppressSocketReconnect || !state.roomCode || state.mode !== "room" || state.screen !== "game") {
+    return;
+  }
+  if (state.roomSocketReconnect) {
+    return;
+  }
+  state.roomSocketReconnect = window.setTimeout(() => {
+    state.roomSocketReconnect = null;
+    connectRoomSocket();
+  }, 1500);
+}
+
+function handleRoomSocketMessage(payload) {
+  if (payload.type === "room_state" && payload.room) {
+    state.room = payload.room;
+    updateInfo();
+    return;
+  }
+  if (payload.type === "room_closed") {
+    disconnectRoomSocket();
+    handleApiError(new Error(payload.error || "Room not found or expired."));
+  }
+}
+
+function connectRoomSocket() {
+  if (typeof WebSocket === "undefined" || !state.roomCode || !state.sessionId || state.mode !== "room" || state.screen !== "game") {
+    return;
+  }
+  if (roomSocketOpen()) {
+    return;
+  }
+  disconnectRoomSocket({ suppressReconnect: false });
+  state.suppressSocketReconnect = false;
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${protocol}://${location.host}/ws?code=${encodeURIComponent(state.roomCode)}&session=${encodeURIComponent(state.sessionId)}`;
+  const socket = new WebSocket(url);
+  state.roomSocket = socket;
+
+  socket.addEventListener("open", () => {
+    if (state.roomSocket === socket) {
+      updateInfo();
+    }
+  });
+
+  socket.addEventListener("message", (event) => {
+    try {
+      handleRoomSocketMessage(JSON.parse(event.data));
+    } catch (_error) {
+      setStatus("Received an invalid live update.");
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (state.roomSocket === socket) {
+      state.roomSocket = null;
+    }
+    if (!state.suppressSocketReconnect) {
+      scheduleRoomSocketReconnect();
+      if (state.roomCode) {
+        setStatus("Live sync interrupted. Reconnecting...");
+      }
+    }
+  });
 }
 
 function showScreen(screen) {
@@ -504,7 +595,7 @@ function updateInfo() {
     if (state.room.pending_undo_request) {
       els.linkStateLabel.textContent = state.room.pending_undo_from_you ? "Waiting for undo reply" : "Undo request received";
     } else {
-      els.linkStateLabel.textContent = `${state.room.connected_count}/2 connected`;
+      els.linkStateLabel.textContent = `${state.room.connected_count}/2 connected${roomSocketOpen() ? " - live" : " - reconnecting"}`;
     }
     const showDecision = state.room.pending_undo_request && !state.room.pending_undo_from_you;
     els.acceptUndoBtn.classList.toggle("hidden", !showDecision);
@@ -531,6 +622,7 @@ function updateInfo() {
 function handleApiError(error) {
   const message = error.message || "Request failed.";
   if (message.includes("Room not found or expired")) {
+    disconnectRoomSocket();
     state.room = null;
     state.roomCode = "";
     els.roomCodeInput.value = "";
@@ -551,6 +643,7 @@ function handleApiError(error) {
 
 async function leaveRoom({ silent = false } = {}) {
   stopVoiceUi();
+  disconnectRoomSocket();
   if (!state.roomCode || state.leavingRoom) return;
   state.leavingRoom = true;
   const code = state.roomCode;
@@ -575,6 +668,7 @@ async function leaveRoom({ silent = false } = {}) {
 
 function leaveRoomOnUnload() {
   stopVoiceUi();
+  disconnectRoomSocket();
   if (!state.roomCode) return;
   const payload = JSON.stringify({ code: state.roomCode });
   const blob = new Blob([payload], { type: "application/json" });
@@ -583,6 +677,7 @@ function leaveRoomOnUnload() {
 
 async function goToLanding() {
   stopVoiceUi();
+  disconnectRoomSocket();
   if (state.roomCode) {
     await leaveRoom({ silent: true });
   }
@@ -600,12 +695,14 @@ async function enterLocalMode() {
 }
 
 function enterOnlineSetup() {
+  disconnectRoomSocket({ suppressReconnect: true });
   state.mode = "room";
   showScreen("online-setup");
   setSetupStatus("Create a room or join one with a room code.");
 }
 
 async function startLocal() {
+  disconnectRoomSocket();
   if (state.roomCode) {
     await leaveRoom({ silent: true });
   }
@@ -646,6 +743,7 @@ async function createRoom() {
   showScreen("game");
   setStatus(`Room created: ${data.room.code}`);
   updateInfo();
+  connectRoomSocket();
 }
 
 async function joinRoom() {
@@ -664,6 +762,7 @@ async function joinRoom() {
   showScreen("game");
   setStatus(`Joined room: ${data.room.code}`);
   updateInfo();
+  connectRoomSocket();
 }
 
 async function roomUndo(action = "request") {
@@ -737,11 +836,19 @@ async function refresh() {
       }
       const data = await api("/api/local/state");
       state.local = data.state;
-    } else if (state.mode === "room" && state.roomCode) {
-      const data = await api(`/api/rooms/state?code=${encodeURIComponent(state.roomCode)}`);
-      state.room = data.room;
+      updateInfo();
+      return;
     }
-    updateInfo();
+    if (state.mode === "room" && state.roomCode) {
+      if (!roomSocketOpen() && !state.roomSocketReconnect) {
+        connectRoomSocket();
+      }
+      if (!roomSocketOpen()) {
+        const data = await api(`/api/rooms/state?code=${encodeURIComponent(state.roomCode)}`);
+        state.room = data.room;
+        updateInfo();
+      }
+    }
   } catch (error) {
     handleApiError(error);
   }

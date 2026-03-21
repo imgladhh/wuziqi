@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import parse_qs, urlparse
+
+from aiohttp import WSMsgType, web
 
 from gomoku_core import BLACK, EMPTY, WHITE, GameBoard, GomokuAI, opponent
 
@@ -85,10 +85,6 @@ def room_win_reason(room: "Room") -> str:
     return ""
 
 
-def room_timer_active(room: "Room") -> bool:
-    return len(room.players) >= 2 and room_winner(room) == EMPTY and not room_hint_pause_active(room)
-
-
 def room_hint_pause_active(room: "Room") -> bool:
     return room.hint_pause_session is not None and room.hint_pause_until > now_ts()
 
@@ -109,17 +105,22 @@ def sync_room_hint_pause(room: "Room") -> None:
     clear_hint_pause(room)
 
 
+def room_timer_active(room: "Room") -> bool:
+    return len(room.players) >= 2 and room_winner(room) == EMPTY and not room_hint_pause_active(room)
+
+
 def room_time_left(room: "Room") -> int:
     sync_room_hint_pause(room)
+    if room_hint_pause_active(room):
+        return room.hint_pause_time_left or room.turn_limit_seconds
     if not room_timer_active(room):
-        if room_hint_pause_active(room):
-            return room.hint_pause_time_left or room.turn_limit_seconds
         return room.turn_limit_seconds
     elapsed = max(0, now_ts() - room.turn_started_at)
     return max(0, room.turn_limit_seconds - elapsed)
 
 
 def apply_room_timeout(room: "Room") -> None:
+    sync_room_hint_pause(room)
     if not room_timer_active(room):
         return
     if room_time_left(room) > 0:
@@ -128,6 +129,7 @@ def apply_room_timeout(room: "Room") -> None:
     winner_stone = opponent(loser_stone)
     room.timeout_winner = winner_stone
     room.pending_undo_request = None
+    clear_hint_pause(room)
     loser_name = room.names.get(session_for_stone(room, loser_stone) or "", "A player")
     winner_name = room.names.get(session_for_stone(room, winner_stone) or "", "A player")
     add_room_message(room, "System", f"{loser_name} ran out of time. {winner_name} wins on time.", system=True)
@@ -202,6 +204,7 @@ class GameStore:
         self.lock = threading.Lock()
         self.local_games: Dict[str, LocalGame] = {}
         self.rooms: Dict[str, Room] = {}
+        self.room_clients: Dict[str, Dict[web.WebSocketResponse, str]] = {}
 
     def get_local(self, session_id: str) -> LocalGame:
         if session_id not in self.local_games:
@@ -236,6 +239,23 @@ class GameStore:
 
     def remove_room(self, code: str) -> None:
         self.rooms.pop(code, None)
+
+    def register_ws(self, code: str, ws: web.WebSocketResponse, session_id: str) -> None:
+        self.room_clients.setdefault(code, {})[ws] = session_id
+
+    def unregister_ws(self, code: str, ws: web.WebSocketResponse) -> None:
+        clients = self.room_clients.get(code)
+        if not clients:
+            return
+        clients.pop(ws, None)
+        if not clients:
+            self.room_clients.pop(code, None)
+
+    def room_client_items(self, code: str) -> list[tuple[web.WebSocketResponse, str]]:
+        return list(self.room_clients.get(code, {}).items())
+
+    def all_client_codes(self) -> list[str]:
+        return list(self.room_clients.keys())
 
 
 STORE = GameStore()
@@ -306,367 +326,431 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
     }
 
 
-class AppHandler(BaseHTTPRequestHandler):
-    server_version = "WuziqiWeb/1.0"
+def request_session_id(request: web.Request) -> str:
+    incoming = request.headers.get("X-Session-Id") or request.query.get("session")
+    return incoming if incoming else secrets.token_hex(16)
 
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            return self.serve_file("index.html", "text/html; charset=utf-8")
-        if parsed.path.startswith("/assets/"):
-            rel = parsed.path[len("/assets/") :]
-            return self.serve_asset(rel)
-        if parsed.path == "/api/local/state":
-            return self.handle_local_state()
-        if parsed.path == "/api/rooms/state":
-            return self.handle_room_state(parsed)
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-    def do_POST(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/api/local/new":
-            return self.handle_local_new()
-        if path == "/api/local/move":
-            return self.handle_local_move()
-        if path == "/api/local/undo":
-            return self.handle_local_undo()
-        if path == "/api/rooms/create":
-            return self.handle_room_create()
-        if path == "/api/rooms/join":
-            return self.handle_room_join()
-        if path == "/api/rooms/move":
-            return self.handle_room_move()
-        if path == "/api/rooms/reset":
-            return self.handle_room_reset()
-        if path == "/api/rooms/undo":
-            return self.handle_room_undo()
-        if path == "/api/rooms/chat":
-            return self.handle_room_chat()
-        if path == "/api/rooms/hint":
-            return self.handle_room_hint()
-        if path == "/api/rooms/leave":
-            return self.handle_room_leave()
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+async def read_json(request: web.Request) -> dict[str, Any]:
+    if request.content_length in (None, 0):
+        return {}
+    raw = await request.read()
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8"))
 
-    def serve_asset(self, relative_path: str) -> None:
-        file_path = STATIC_DIR / "assets" / relative_path
-        if not file_path.exists():
-            self.send_error(HTTPStatus.NOT_FOUND, "Asset not found")
-            return
-        content_type = {
-            ".css": "text/css; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-        }.get(file_path.suffix, "application/octet-stream")
-        self.serve_raw(file_path.read_bytes(), content_type)
 
-    def serve_file(self, name: str, content_type: str) -> None:
-        file_path = STATIC_DIR / name
-        self.serve_raw(file_path.read_bytes(), content_type)
+def json_response(payload: dict[str, Any], session_id: str, status: int = 200) -> web.Response:
+    response = web.json_response(payload, status=status, dumps=lambda obj: json.dumps(obj, ensure_ascii=False))
+    response.headers["X-Session-Id"] = session_id
+    return response
 
-    def serve_raw(self, payload: bytes, content_type: str) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
-    def read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
-        return json.loads(raw.decode("utf-8"))
+async def index(_request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(STATIC_DIR / "index.html")
 
-    def session_id(self) -> str:
-        incoming = self.headers.get("X-Session-Id")
-        return incoming if incoming else secrets.token_hex(16)
 
-    def send_json(self, payload: dict[str, Any], status: int = 200, session_id: Optional[str] = None) -> None:
-        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        if session_id:
-            self.send_header("X-Session-Id", session_id)
-        self.end_headers()
-        self.wfile.write(raw)
+async def local_new(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    depth = int(body.get("depth", 2))
+    with STORE.lock:
+        game = STORE.get_local(session_id)
+        game.reset(depth)
+        payload = local_state_payload(game)
+    return json_response({"ok": True, "state": payload}, session_id)
 
-    def handle_local_new(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        depth = int(body.get("depth", 2))
-        with STORE.lock:
-            game = STORE.get_local(session_id)
-            game.reset(depth)
-            payload = local_state_payload(game)
-        self.send_json({"ok": True, "state": payload}, session_id=session_id)
 
-    def handle_local_state(self) -> None:
-        session_id = self.session_id()
-        with STORE.lock:
-            payload = local_state_payload(STORE.get_local(session_id))
-        self.send_json({"ok": True, "state": payload}, session_id=session_id)
+async def local_state(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    with STORE.lock:
+        payload = local_state_payload(STORE.get_local(session_id))
+    return json_response({"ok": True, "state": payload}, session_id)
 
-    def handle_local_move(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        x, y = int(body["x"]), int(body["y"])
-        with STORE.lock:
-            game = STORE.get_local(session_id)
-            if game.current_turn != BLACK or not game.board.place(x, y, BLACK):
-                return self.send_json({"ok": False, "error": "You cannot move right now."}, 400, session_id)
-            game.current_turn = WHITE
-            if not game.board.is_game_over:
-                ai = GomokuAI(game.depth)
-                move = ai.best_move(game.board, WHITE)
-                if game.board.place(move.x, move.y, WHITE):
-                    game.last_opponent_move = (move.x, move.y)
-                game.current_turn = BLACK
-            payload = local_state_payload(game)
-        self.send_json({"ok": True, "state": payload}, session_id=session_id)
 
-    def handle_local_undo(self) -> None:
-        session_id = self.session_id()
-        with STORE.lock:
-            game = STORE.get_local(session_id)
-            undone = 0
-            for _ in range(2):
-                move = game.board.undo_last()
-                if move is None:
-                    break
-                undone += 1
-            game.current_turn = BLACK if game.board.move_count % 2 == 0 else WHITE
-            game.last_opponent_move = None
-            for x, y, stone in reversed(game.board.history):
-                if stone == WHITE:
-                    game.last_opponent_move = (x, y)
-                    break
-            payload = local_state_payload(game)
-        self.send_json({"ok": undone > 0, "state": payload}, session_id=session_id)
+async def local_move(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    x, y = int(body["x"]), int(body["y"])
+    with STORE.lock:
+        game = STORE.get_local(session_id)
+        if game.current_turn != BLACK or not game.board.place(x, y, BLACK):
+            return json_response({"ok": False, "error": "You cannot move right now."}, session_id, 400)
+        game.current_turn = WHITE
+        if not game.board.is_game_over:
+            ai = GomokuAI(game.depth)
+            move = ai.best_move(game.board, WHITE)
+            if game.board.place(move.x, move.y, WHITE):
+                game.last_opponent_move = (move.x, move.y)
+            game.current_turn = BLACK
+        payload = local_state_payload(game)
+    return json_response({"ok": True, "state": payload}, session_id)
 
-    def handle_room_create(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        name = str(body.get("name", "Host")).strip() or "Host"
-        turn_limit_seconds = int(body.get("turn_limit_seconds", DEFAULT_ROOM_TURN_LIMIT_SECONDS))
-        turn_limit_seconds = max(10, min(300, turn_limit_seconds))
-        with STORE.lock:
-            room = STORE.create_room(session_id, name, turn_limit_seconds)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
-    def handle_room_join(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body.get("code", "")).strip().upper()
-        name = str(body.get("name", "Player")).strip() or "Player"
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            if session_id not in room.players:
-                if len(room.players) >= 2:
-                    return self.send_json({"ok": False, "error": "Room is full."}, 400, session_id)
-                room.players[session_id] = BLACK if BLACK not in room.players.values() else WHITE
-                room.names[session_id] = name
-                room.turn_started_at = now_ts()
-                add_room_message(room, "System", f"{name} joined the room.", system=True)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
+async def local_undo(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    with STORE.lock:
+        game = STORE.get_local(session_id)
+        undone = 0
+        for _ in range(2):
+            move = game.board.undo_last()
+            if move is None:
+                break
+            undone += 1
+        game.current_turn = BLACK if game.board.move_count % 2 == 0 else WHITE
+        game.last_opponent_move = None
+        for x, y, stone in reversed(game.board.history):
+            if stone == WHITE:
+                game.last_opponent_move = (x, y)
+                break
+        payload = local_state_payload(game)
+    return json_response({"ok": undone > 0, "state": payload}, session_id)
 
-    def handle_room_state(self, parsed) -> None:
-        session_id = self.session_id()
-        code = parse_qs(parsed.query).get("code", [""])[0].upper()
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
-    def handle_room_move(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body["code"]).upper()
-        x, y = int(body["x"]), int(body["y"])
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            apply_room_timeout(room)
-            stone = room.players.get(session_id, EMPTY)
-            if stone == EMPTY:
-                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            if room_winner(room) != EMPTY:
-                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
-            if room.current_turn != stone or not room.board.place(x, y, stone):
-                return self.send_json({"ok": False, "error": "You cannot move right now."}, 400, session_id)
-            room.current_turn = opponent(stone)
-            room.last_move = (x, y, stone)
+async def create_room(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    name = str(body.get("name", "Host")).strip() or "Host"
+    turn_limit_seconds = int(body.get("turn_limit_seconds", DEFAULT_ROOM_TURN_LIMIT_SECONDS))
+    turn_limit_seconds = max(10, min(300, turn_limit_seconds))
+    with STORE.lock:
+        room = STORE.create_room(session_id, name, turn_limit_seconds)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(room.code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def join_room(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body.get("code", "")).strip().upper()
+    name = str(body.get("name", "Player")).strip() or "Player"
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        if session_id not in room.players:
+            if len(room.players) >= 2:
+                return json_response({"ok": False, "error": "Room is full."}, session_id, 400)
+            room.players[session_id] = BLACK if BLACK not in room.players.values() else WHITE
+            room.names[session_id] = name
             room.turn_started_at = now_ts()
+            add_room_message(room, "System", f"{name} joined the room.", system=True)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_state(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    code = str(request.query.get("code", "")).strip().upper()
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        payload = room_state_payload(room, session_id)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_move(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    x, y = int(body["x"]), int(body["y"])
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        apply_room_timeout(room)
+        stone = room.players.get(session_id, EMPTY)
+        if stone == EMPTY:
+            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+        if room_winner(room) != EMPTY:
+            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+        if room.current_turn != stone or not room.board.place(x, y, stone):
+            return json_response({"ok": False, "error": "You cannot move right now."}, session_id, 400)
+        room.current_turn = opponent(stone)
+        room.last_move = (x, y, stone)
+        room.turn_started_at = now_ts()
+        room.pending_undo_request = None
+        room.hint_details.clear()
+        clear_hint_pause(room)
+        room.updated_at = now_ts()
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_reset(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        if session_id not in room.players:
+            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+        room.reset()
+        actor = room.names.get(session_id, "A player")
+        add_room_message(room, "System", f"{actor} reset the board.", system=True)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_undo(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    action = str(body["action"])
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        if session_id not in room.players:
+            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+        apply_room_timeout(room)
+        if room_winner(room) != EMPTY:
+            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+        if action == "request":
+            room.pending_undo_request = session_id
+            actor = room.names.get(session_id, "A player")
+            add_room_message(room, "System", f"{actor} requested an undo.", system=True)
+        elif action == "accept":
+            if room.pending_undo_request is None:
+                return json_response({"ok": False, "error": "There is no pending undo request."}, session_id, 400)
+            requester = room.names.get(room.pending_undo_request, "A player")
+            room.undo_round()
+            actor = room.names.get(session_id, "A player")
+            add_room_message(room, "System", f"{actor} accepted {requester}'s undo request.", system=True)
+        elif action == "reject":
+            requester = room.names.get(room.pending_undo_request, "A player") if room.pending_undo_request is not None else "A player"
             room.pending_undo_request = None
-            room.hint_details.clear()
+            actor = room.names.get(session_id, "A player")
+            add_room_message(room, "System", f"{actor} rejected {requester}'s undo request.", system=True)
+        else:
+            return json_response({"ok": False, "error": "Unknown action."}, session_id, 400)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_hint(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        sync_room_hint_pause(room)
+        apply_room_timeout(room)
+        stone = room.players.get(session_id, EMPTY)
+        if stone == EMPTY:
+            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+        if room_winner(room) != EMPTY:
+            return json_response({"ok": False, "error": "This game is already over."}, session_id, 400)
+        if room.current_turn != stone:
+            return json_response({"ok": False, "error": "You can only request a hint on your turn."}, session_id, 400)
+        if session_id in room.hints_used:
+            return json_response({"ok": False, "error": "You have already used your AI hint in this game."}, session_id, 400)
+        remaining_before_pause = room_time_left(room)
+        ai = GomokuAI(depth=3)
+        move, reason = ai.suggest_move(room.board, stone)
+        room.hints_used.add(session_id)
+        room.hint_details[session_id] = {
+            "move": [move.x, move.y],
+            "reason": reason,
+        }
+        room.hint_pause_session = session_id
+        room.hint_pause_time_left = remaining_before_pause
+        room.hint_pause_until = now_ts() + ROOM_HINT_PAUSE_SECONDS
+        actor = room.names.get(session_id, "A player")
+        add_room_message(room, "System", f"{actor} used their one-time AI hint.", system=True)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_chat(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body["code"]).upper()
+    message_type = str(body.get("type", "text")).strip().lower() or "text"
+    message_text = str(body.get("text", "")).strip()
+    audio_data = str(body.get("audio_data", "")).strip()
+    mime_type = str(body.get("mime_type", "")).strip()
+    duration_seconds = int(body.get("duration_seconds", 0))
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": False, "error": "Room not found or expired."}, session_id, 404)
+        if session_id not in room.players:
+            return json_response({"ok": False, "error": "You are not in this room."}, session_id, 403)
+        sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
+        if message_type == "voice":
+            if not audio_data or not audio_data.startswith("data:audio/"):
+                return json_response({"ok": False, "error": "Voice message data is invalid."}, session_id, 400)
+            if len(audio_data) > 1_500_000:
+                return json_response({"ok": False, "error": "Voice message is too large."}, session_id, 400)
+            duration_seconds = max(1, min(15, duration_seconds or 1))
+            add_room_message(
+                room,
+                sender,
+                f"Voice message ({duration_seconds}s)",
+                session_id=session_id,
+                message_type="voice",
+                audio_data=audio_data,
+                mime_type=mime_type[:80],
+                duration_seconds=duration_seconds,
+            )
+        else:
+            if not message_text:
+                return json_response({"ok": False, "error": "Message cannot be empty."}, session_id, 400)
+            add_room_message(room, sender, message_text, session_id=session_id)
+        payload = room_state_payload(room, session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
+
+
+async def room_leave(request: web.Request) -> web.Response:
+    session_id = request_session_id(request)
+    body = await read_json(request)
+    code = str(body.get("code", "")).strip().upper()
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            return json_response({"ok": True, "room": None}, session_id)
+        stone = room.players.pop(session_id, EMPTY)
+        actor = room.names.pop(session_id, "A player")
+        if stone == EMPTY:
+            payload = room_state_payload(room, session_id) if room.code in STORE.rooms else None
+            return json_response({"ok": True, "room": payload}, session_id)
+        if room.pending_undo_request == session_id:
+            room.pending_undo_request = None
+        if room.hint_pause_session == session_id:
             clear_hint_pause(room)
-            room.updated_at = now_ts()
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
-
-    def handle_room_reset(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body["code"]).upper()
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            if session_id not in room.players:
-                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            room.reset()
-            actor = room.names.get(session_id, "A player")
-            add_room_message(room, "System", f"{actor} reset the board.", system=True)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
-
-    def handle_room_undo(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body["code"]).upper()
-        action = str(body["action"])
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            if session_id not in room.players:
-                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            apply_room_timeout(room)
-            if room_winner(room) != EMPTY:
-                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
-            if action == "request":
-                room.pending_undo_request = session_id
-                actor = room.names.get(session_id, "A player")
-                add_room_message(room, "System", f"{actor} requested an undo.", system=True)
-            elif action == "accept":
-                if room.pending_undo_request is None:
-                    return self.send_json({"ok": False, "error": "There is no pending undo request."}, 400, session_id)
-                requester = room.names.get(room.pending_undo_request, "A player")
-                room.undo_round()
-                actor = room.names.get(session_id, "A player")
-                add_room_message(room, "System", f"{actor} accepted {requester}'s undo request.", system=True)
-            elif action == "reject":
-                requester = room.names.get(room.pending_undo_request, "A player") if room.pending_undo_request is not None else "A player"
-                room.pending_undo_request = None
-                actor = room.names.get(session_id, "A player")
-                add_room_message(room, "System", f"{actor} rejected {requester}'s undo request.", system=True)
-            else:
-                return self.send_json({"ok": False, "error": "Unknown action."}, 400, session_id)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
-
-    def handle_room_hint(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body["code"]).upper()
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            sync_room_hint_pause(room)
-            apply_room_timeout(room)
-            stone = room.players.get(session_id, EMPTY)
-            if stone == EMPTY:
-                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            if room_winner(room) != EMPTY:
-                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
-            if room.current_turn != stone:
-                return self.send_json({"ok": False, "error": "You can only request a hint on your turn."}, 400, session_id)
-            if session_id in room.hints_used:
-                return self.send_json({"ok": False, "error": "You have already used your AI hint in this game."}, 400, session_id)
-            ai = GomokuAI(depth=3)
-            move, reason = ai.suggest_move(room.board, stone)
-            room.hints_used.add(session_id)
-            room.hint_details[session_id] = {
-                "move": [move.x, move.y],
-                "reason": reason,
-            }
-            room.hint_pause_session = session_id
-            room.hint_pause_time_left = room_time_left(room)
-            room.hint_pause_until = now_ts() + ROOM_HINT_PAUSE_SECONDS
-            actor = room.names.get(session_id, "A player")
-            add_room_message(room, "System", f"{actor} used their one-time AI hint.", system=True)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
-
-    def handle_room_chat(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body["code"]).upper()
-        message_type = str(body.get("type", "text")).strip().lower() or "text"
-        message_text = str(body.get("text", "")).strip()
-        audio_data = str(body.get("audio_data", "")).strip()
-        mime_type = str(body.get("mime_type", "")).strip()
-        duration_seconds = int(body.get("duration_seconds", 0))
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
-            if session_id not in room.players:
-                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
-            sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
-            if message_type == "voice":
-                if not audio_data or not audio_data.startswith("data:audio/"):
-                    return self.send_json({"ok": False, "error": "Voice message data is invalid."}, 400, session_id)
-                if len(audio_data) > 1_500_000:
-                    return self.send_json({"ok": False, "error": "Voice message is too large."}, 400, session_id)
-                duration_seconds = max(1, min(15, duration_seconds or 1))
-                add_room_message(
-                    room,
-                    sender,
-                    f"Voice message ({duration_seconds}s)",
-                    session_id=session_id,
-                    message_type="voice",
-                    audio_data=audio_data,
-                    mime_type=mime_type[:80],
-                    duration_seconds=duration_seconds,
-                )
-            else:
-                if not message_text:
-                    return self.send_json({"ok": False, "error": "Message cannot be empty."}, 400, session_id)
-                add_room_message(room, sender, message_text, session_id=session_id)
-            payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
-
-    def handle_room_leave(self) -> None:
-        session_id = self.session_id()
-        body = self.read_json()
-        code = str(body.get("code", "")).strip().upper()
-        with STORE.lock:
-            room = STORE.get_room(code)
-            if room is None:
-                return self.send_json({"ok": True, "room": None}, session_id=session_id)
-            stone = room.players.pop(session_id, EMPTY)
-            actor = room.names.pop(session_id, "A player")
-            if stone == EMPTY:
-                payload = room_state_payload(room, session_id) if room.code in STORE.rooms else None
-                return self.send_json({"ok": True, "room": payload}, session_id=session_id)
-            if room.pending_undo_request == session_id:
-                room.pending_undo_request = None
-            if room.hint_pause_session == session_id:
-                clear_hint_pause(room)
-            room.hint_details.pop(session_id, None)
-            if not room.players:
-                STORE.remove_room(code)
-                return self.send_json({"ok": True, "room": None}, session_id=session_id)
+        room.hint_details.pop(session_id, None)
+        if not room.players:
+            STORE.remove_room(code)
+            payload = None
+        else:
             room.turn_started_at = now_ts()
             add_room_message(room, "System", f"{actor} left the room.", system=True)
             payload = room_state_payload(room, session_id)
-        self.send_json({"ok": True, "room": payload}, session_id=session_id)
+    await broadcast_room(code)
+    return json_response({"ok": True, "room": payload}, session_id)
 
-    def log_message(self, format: str, *args) -> None:
+
+async def websocket_room(request: web.Request) -> web.StreamResponse:
+    session_id = request_session_id(request)
+    code = str(request.query.get("code", "")).strip().upper()
+    ws = web.WebSocketResponse(heartbeat=25)
+    await ws.prepare(request)
+
+    with STORE.lock:
+        room = STORE.get_room(code)
+        if room is None:
+            await ws.send_json({"type": "room_closed", "error": "Room not found or expired."})
+            await ws.close()
+            return ws
+        if session_id not in room.players:
+            await ws.send_json({"type": "room_closed", "error": "You are not in this room."})
+            await ws.close()
+            return ws
+        STORE.register_ws(code, ws, session_id)
+        payload = room_state_payload(room, session_id)
+
+    await ws.send_json({"type": "room_state", "room": payload})
+
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                if msg.data == "ping":
+                    await ws.send_str("pong")
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        with STORE.lock:
+            STORE.unregister_ws(code, ws)
+    return ws
+
+
+async def broadcast_room(code: str) -> None:
+    with STORE.lock:
+        room = STORE.get_room(code)
+        clients = STORE.room_client_items(code)
+        if room is None:
+            payloads = [(ws, {"type": "room_closed", "error": "Room not found or expired."}) for ws, _sid in clients]
+        else:
+            payloads = [(ws, {"type": "room_state", "room": room_state_payload(room, sid)}) for ws, sid in clients]
+
+    stale: list[web.WebSocketResponse] = []
+    for ws, payload in payloads:
+        if ws.closed:
+            stale.append(ws)
+            continue
+        try:
+            await ws.send_json(payload)
+            if payload.get("type") == "room_closed":
+                await ws.close()
+                stale.append(ws)
+        except Exception:
+            stale.append(ws)
+
+    if stale:
+        with STORE.lock:
+            for ws in stale:
+                STORE.unregister_ws(code, ws)
+
+
+async def room_push_loop(_app: web.Application) -> None:
+    while True:
+        await asyncio.sleep(1)
+        for code in STORE.all_client_codes():
+            await broadcast_room(code)
+
+
+async def start_background_tasks(app: web.Application) -> None:
+    app["room_push_task"] = asyncio.create_task(room_push_loop(app))
+
+
+async def cleanup_background_tasks(app: web.Application) -> None:
+    task = app.get("room_push_task")
+    if task is None:
         return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = web.Application()
+app.router.add_get("/", index)
+app.router.add_static("/assets/", path=STATIC_DIR / "assets")
+app.router.add_get("/ws", websocket_room)
+app.router.add_get("/api/local/state", local_state)
+app.router.add_get("/api/rooms/state", room_state)
+app.router.add_post("/api/local/new", local_new)
+app.router.add_post("/api/local/move", local_move)
+app.router.add_post("/api/local/undo", local_undo)
+app.router.add_post("/api/rooms/create", create_room)
+app.router.add_post("/api/rooms/join", join_room)
+app.router.add_post("/api/rooms/move", room_move)
+app.router.add_post("/api/rooms/reset", room_reset)
+app.router.add_post("/api/rooms/undo", room_undo)
+app.router.add_post("/api/rooms/hint", room_hint)
+app.router.add_post("/api/rooms/chat", room_chat)
+app.router.add_post("/api/rooms/leave", room_leave)
+app.on_startup.append(start_background_tasks)
+app.on_cleanup.append(cleanup_background_tasks)
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), AppHandler)
     print(f"Web server running on {HOST}:{PORT}")
-    server.serve_forever()
+    web.run_app(app, host=HOST, port=PORT, print=None)
 
 
 if __name__ == "__main__":
