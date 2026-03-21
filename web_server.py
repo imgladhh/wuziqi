@@ -21,6 +21,7 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 ROOM_TTL_SECONDS = int(os.environ.get("ROOM_TTL_SECONDS", "1800"))
 DEFAULT_ROOM_TURN_LIMIT_SECONDS = int(os.environ.get("ROOM_TURN_LIMIT_SECONDS", "30"))
+ROOM_HINT_PAUSE_SECONDS = int(os.environ.get("ROOM_HINT_PAUSE_SECONDS", "20"))
 
 
 def stone_name(stone: int) -> str:
@@ -85,11 +86,34 @@ def room_win_reason(room: "Room") -> str:
 
 
 def room_timer_active(room: "Room") -> bool:
-    return len(room.players) >= 2 and room_winner(room) == EMPTY
+    return len(room.players) >= 2 and room_winner(room) == EMPTY and not room_hint_pause_active(room)
+
+
+def room_hint_pause_active(room: "Room") -> bool:
+    return room.hint_pause_session is not None and room.hint_pause_until > now_ts()
+
+
+def clear_hint_pause(room: "Room") -> None:
+    room.hint_pause_session = None
+    room.hint_pause_until = 0
+    room.hint_pause_time_left = 0
+
+
+def sync_room_hint_pause(room: "Room") -> None:
+    if not room.hint_pause_session:
+        return
+    if room.hint_pause_until > now_ts():
+        return
+    remaining = room.hint_pause_time_left or room.turn_limit_seconds
+    room.turn_started_at = now_ts() - max(0, room.turn_limit_seconds - remaining)
+    clear_hint_pause(room)
 
 
 def room_time_left(room: "Room") -> int:
+    sync_room_hint_pause(room)
     if not room_timer_active(room):
+        if room_hint_pause_active(room):
+            return room.hint_pause_time_left or room.turn_limit_seconds
         return room.turn_limit_seconds
     elapsed = max(0, now_ts() - room.turn_started_at)
     return max(0, room.turn_limit_seconds - elapsed)
@@ -137,6 +161,11 @@ class Room:
     turn_limit_seconds: int = DEFAULT_ROOM_TURN_LIMIT_SECONDS
     timeout_winner: int = EMPTY
     chat_messages: list[dict[str, Any]] = field(default_factory=list)
+    hints_used: set[str] = field(default_factory=set)
+    hint_details: Dict[str, dict[str, Any]] = field(default_factory=dict)
+    hint_pause_session: Optional[str] = None
+    hint_pause_until: int = 0
+    hint_pause_time_left: int = 0
 
     def reset(self) -> None:
         self.board.reset()
@@ -145,6 +174,9 @@ class Room:
         self.last_move = None
         self.turn_started_at = now_ts()
         self.timeout_winner = EMPTY
+        self.hints_used.clear()
+        self.hint_details.clear()
+        clear_hint_pause(self)
         self.updated_at = now_ts()
 
     def undo_round(self) -> int:
@@ -159,6 +191,8 @@ class Room:
         self.pending_undo_request = None
         self.turn_started_at = now_ts()
         self.timeout_winner = EMPTY
+        self.hint_details.clear()
+        clear_hint_pause(self)
         self.updated_at = now_ts()
         return undone
 
@@ -222,6 +256,7 @@ def local_state_payload(game: LocalGame) -> dict[str, Any]:
 
 
 def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
+    sync_room_hint_pause(room)
     apply_room_timeout(room)
     your_stone = room.players.get(session_id, EMPTY)
     opponent_move = None
@@ -246,10 +281,14 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
         "turn_time_limit_seconds": room.turn_limit_seconds,
         "turn_time_left_seconds": room_time_left(room),
         "turn_timer_active": room_timer_active(room),
+        "timer_pause_reason": "ai-hint" if room_hint_pause_active(room) else "",
+        "hint_pause_remaining_seconds": max(0, room.hint_pause_until - now_ts()) if room_hint_pause_active(room) else 0,
         "pending_undo_request": room.pending_undo_request is not None,
         "pending_undo_from_you": room.pending_undo_request == session_id,
         "opponent_last_move": opponent_move,
         "move_count": room.board.move_count,
+        "hint_used": session_id in room.hints_used,
+        "active_hint": room.hint_details.get(session_id),
         "chat_messages": [
             {
                 "sender": msg["sender"],
@@ -303,6 +342,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.handle_room_undo()
         if path == "/api/rooms/chat":
             return self.handle_room_chat()
+        if path == "/api/rooms/hint":
+            return self.handle_room_hint()
         if path == "/api/rooms/leave":
             return self.handle_room_leave()
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -462,6 +503,8 @@ class AppHandler(BaseHTTPRequestHandler):
             room.last_move = (x, y, stone)
             room.turn_started_at = now_ts()
             room.pending_undo_request = None
+            room.hint_details.clear()
+            clear_hint_pause(room)
             room.updated_at = now_ts()
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
@@ -514,6 +557,40 @@ class AppHandler(BaseHTTPRequestHandler):
                 add_room_message(room, "System", f"{actor} rejected {requester}'s undo request.", system=True)
             else:
                 return self.send_json({"ok": False, "error": "Unknown action."}, 400, session_id)
+            payload = room_state_payload(room, session_id)
+        self.send_json({"ok": True, "room": payload}, session_id=session_id)
+
+    def handle_room_hint(self) -> None:
+        session_id = self.session_id()
+        body = self.read_json()
+        code = str(body["code"]).upper()
+        with STORE.lock:
+            room = STORE.get_room(code)
+            if room is None:
+                return self.send_json({"ok": False, "error": "Room not found or expired."}, 404, session_id)
+            sync_room_hint_pause(room)
+            apply_room_timeout(room)
+            stone = room.players.get(session_id, EMPTY)
+            if stone == EMPTY:
+                return self.send_json({"ok": False, "error": "You are not in this room."}, 403, session_id)
+            if room_winner(room) != EMPTY:
+                return self.send_json({"ok": False, "error": "This game is already over."}, 400, session_id)
+            if room.current_turn != stone:
+                return self.send_json({"ok": False, "error": "You can only request a hint on your turn."}, 400, session_id)
+            if session_id in room.hints_used:
+                return self.send_json({"ok": False, "error": "You have already used your AI hint in this game."}, 400, session_id)
+            ai = GomokuAI(depth=3)
+            move, reason = ai.suggest_move(room.board, stone)
+            room.hints_used.add(session_id)
+            room.hint_details[session_id] = {
+                "move": [move.x, move.y],
+                "reason": reason,
+            }
+            room.hint_pause_session = session_id
+            room.hint_pause_time_left = room_time_left(room)
+            room.hint_pause_until = now_ts() + ROOM_HINT_PAUSE_SECONDS
+            actor = room.names.get(session_id, "A player")
+            add_room_message(room, "System", f"{actor} used their one-time AI hint.", system=True)
             payload = room_state_payload(room, session_id)
         self.send_json({"ok": True, "room": payload}, session_id=session_id)
 
@@ -571,6 +648,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "room": payload}, session_id=session_id)
             if room.pending_undo_request == session_id:
                 room.pending_undo_request = None
+            if room.hint_pause_session == session_id:
+                clear_hint_pause(room)
+            room.hint_details.pop(session_id, None)
             if not room.players:
                 STORE.remove_room(code)
                 return self.send_json({"ok": True, "room": None}, session_id=session_id)

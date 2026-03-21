@@ -180,6 +180,11 @@ class GomokuAI:
                 best = Move(move.x, move.y, score)
         return best or Move(board.size // 2, board.size // 2)
 
+    def suggest_move(self, board: GameBoard, ai_stone: int) -> Tuple[Move, str]:
+        move = self.best_move(board, ai_stone)
+        reason = self._explain_move(board, ai_stone, move)
+        return move, reason
+
     def _minimax(
         self,
         board: GameBoard,
@@ -380,3 +385,37 @@ class GomokuAI:
         if count == 1 and open_ends == 2:
             return 80
         return 10
+
+    def _explain_move(self, board: GameBoard, stone: int, move: Move) -> str:
+        enemy = opponent(stone)
+
+        board.place(move.x, move.y, stone)
+        wins_now = board.winner == stone
+        board.remove(move.x, move.y)
+        if wins_now:
+            return "This move completes five in a row immediately, so it wins on the spot."
+
+        board.place(move.x, move.y, enemy)
+        blocks_loss = board.winner == enemy
+        board.remove(move.x, move.y)
+        if blocks_loss:
+            return "This move blocks the opponent's immediate winning threat and keeps the game alive."
+
+        board.place(move.x, move.y, stone)
+        longest_line = 1
+        best_open_ends = 0
+        creates_major_threat = self._creates_major_threat(board, move.x, move.y, stone)
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, move.x, move.y, dx, dy, stone)
+            if count > longest_line or (count == longest_line and open_ends > best_open_ends):
+                longest_line = count
+                best_open_ends = open_ends
+        board.remove(move.x, move.y)
+
+        if creates_major_threat:
+            return "This move creates a forcing attack, likely an open three or open four, so the opponent must respond."
+        if longest_line >= 4:
+            return "This move extends your strongest chain to four stones and sets up a near-term winning threat."
+        if longest_line == 3 and best_open_ends >= 1:
+            return "This move strengthens your main line to three stones with room to grow on the next turns."
+        return "This move improves board control, supports nearby stones, and keeps the strongest follow-up options open."

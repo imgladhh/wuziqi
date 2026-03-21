@@ -183,6 +183,7 @@ button.primary { background: var(--accent); }
 button.accent { background: #2f7e68; }
 button.danger { background: #ab3d28; }
 button:hover { filter: brightness(1.05); }
+button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 
 .ghost-btn {
   width: auto;
@@ -295,4 +296,22 @@ select, input {
 .chat-text audio {
   width: 100%;
   margin-top: 8px;
+}
+
+.hint-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #edf5fb;
+  border-left: 4px solid #1769aa;
+}
+
+.hint-panel strong {
+  color: #114a78;
+}
+
+.hint-panel p {
+  margin: 0;
+  color: #2e4c61;
+  line-height: 1.45;
 }

@@ -80,6 +80,7 @@
           <span>Mode</span><strong id="modeLabel">Local vs AI</strong>
           <span>Turn</span><strong id="turnLabel">Your turn</strong>
           <span>Move timer</span><strong id="turnTimerLabel">None</strong>
+          <span>AI hint</span><strong id="hintUsageLabel">None</strong>
           <span>Last enemy move</span><strong id="lastMoveLabel">None</strong>
           <span>Room code</span><strong id="roomCodeLabel">None</strong>
           <span>Connection</span><strong id="linkStateLabel">Offline</strong>
@@ -98,12 +99,17 @@
         </div>
         <div id="onlineActions" class="toolbar hidden">
           <div class="inline">
+            <button id="hintRoomBtn" class="accent">Use AI Hint</button>
             <button id="undoRoomBtn">Request Undo</button>
-            <button id="resetRoomBtn">Reset Board</button>
           </div>
           <div class="inline">
+            <button id="resetRoomBtn">Reset Board</button>
             <button id="acceptUndoBtn" class="accent hidden">Accept Undo</button>
             <button id="rejectUndoBtn" class="danger hidden">Reject Undo</button>
+          </div>
+          <div id="hintPanel" class="hint-panel hidden">
+            <strong id="hintMoveLabel">Suggested move: None</strong>
+            <p id="hintReasonLabel">Use your one-time hint to get an AI-recommended move and reason.</p>
           </div>
         </div>
       </section>

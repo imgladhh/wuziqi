@@ -33,6 +33,7 @@ const els = {
   modeLabel: document.getElementById("modeLabel"),
   turnLabel: document.getElementById("turnLabel"),
   turnTimerLabel: document.getElementById("turnTimerLabel"),
+  hintUsageLabel: document.getElementById("hintUsageLabel"),
   lastMoveLabel: document.getElementById("lastMoveLabel"),
   roomCodeLabel: document.getElementById("roomCodeLabel"),
   linkStateLabel: document.getElementById("linkStateLabel"),
@@ -45,10 +46,14 @@ const els = {
   copyRoomBtn: document.getElementById("copyRoomBtn"),
   roomCodeInput: document.getElementById("roomCodeInput"),
   joinRoomBtn: document.getElementById("joinRoomBtn"),
+  hintRoomBtn: document.getElementById("hintRoomBtn"),
   undoRoomBtn: document.getElementById("undoRoomBtn"),
   resetRoomBtn: document.getElementById("resetRoomBtn"),
   acceptUndoBtn: document.getElementById("acceptUndoBtn"),
   rejectUndoBtn: document.getElementById("rejectUndoBtn"),
+  hintPanel: document.getElementById("hintPanel"),
+  hintMoveLabel: document.getElementById("hintMoveLabel"),
+  hintReasonLabel: document.getElementById("hintReasonLabel"),
   localActions: document.getElementById("localActions"),
   onlineActions: document.getElementById("onlineActions"),
   chatCard: document.getElementById("chatCard"),
@@ -91,7 +96,7 @@ function syncPanels() {
   els.chatCard.classList.toggle("hidden", !isOnlineGame);
 }
 
-function drawBoard(payload, highlight) {
+function drawBoard(payload, highlight, hintMove = null) {
   ctx.clearRect(0, 0, els.board.width, els.board.height);
   ctx.fillStyle = "#d4ad72";
   ctx.fillRect(0, 0, els.board.width, els.board.height);
@@ -152,6 +157,21 @@ function drawBoard(payload, highlight) {
     ctx.fill();
   }
 
+  if (hintMove) {
+    const [cx, cy] = toCanvas(hintMove[0], hintMove[1]);
+    ctx.save();
+    ctx.strokeStyle = "#1769aa";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(cx - 20, cy - 20, 40, 40);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#1769aa";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   if (state.hoverPoint) {
     const [hx, hy] = state.hoverPoint;
     const [cx, cy] = toCanvas(hx, hy);
@@ -197,6 +217,25 @@ function fromCanvas(px, py) {
 
 function formatMove(move) {
   return move ? `${move[0] + 1},${move[1] + 1}` : "None";
+}
+
+function formatHintMove(move) {
+  return move ? `Suggested move: ${move[0] + 1},${move[1] + 1}` : "Suggested move: None";
+}
+
+function renderHintPanel(hint) {
+  if (!els.hintPanel) {
+    return;
+  }
+  if (!hint || !hint.move) {
+    els.hintPanel.classList.add("hidden");
+    els.hintMoveLabel.textContent = "Suggested move: None";
+    els.hintReasonLabel.textContent = "Use your one-time hint to get an AI-recommended move and reason.";
+    return;
+  }
+  els.hintPanel.classList.remove("hidden");
+  els.hintMoveLabel.textContent = formatHintMove(hint.move);
+  els.hintReasonLabel.textContent = hint.reason || "The AI found a strong move for this position.";
 }
 
 function setStatus(text) {
@@ -422,10 +461,16 @@ function updateInfo() {
       els.turnLabel.textContent = state.local.current_turn === "black" ? "Your turn" : "AI turn";
     }
     els.turnTimerLabel.textContent = "None";
+    els.hintUsageLabel.textContent = "N/A";
+    if (els.hintRoomBtn) {
+      els.hintRoomBtn.disabled = true;
+      els.hintRoomBtn.textContent = "Use AI Hint";
+    }
+    renderHintPanel(null);
     els.lastMoveLabel.textContent = formatMove(state.local.last_opponent_move);
     els.roomCodeLabel.textContent = "None";
     els.linkStateLabel.textContent = "Offline";
-    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null);
+    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null, null);
     renderChat([]);
     return;
   }
@@ -442,9 +487,18 @@ function updateInfo() {
     } else {
       els.turnLabel.textContent = state.room.your_turn ? "Your turn" : "Opponent turn";
     }
-    els.turnTimerLabel.textContent = state.room.turn_timer_active
-      ? `${state.room.turn_time_left_seconds}s / ${state.room.turn_time_limit_seconds}s`
-      : "Paused";
+    els.turnTimerLabel.textContent = state.room.timer_pause_reason === "ai-hint"
+      ? `Paused for AI hint (${state.room.hint_pause_remaining_seconds}s)`
+      : (state.room.turn_timer_active
+        ? `${state.room.turn_time_left_seconds}s / ${state.room.turn_time_limit_seconds}s`
+        : "Paused");
+    els.hintUsageLabel.textContent = state.room.hint_used ? "Used" : "Available";
+    if (els.hintRoomBtn) {
+      const canUseHint = !state.room.hint_used && state.room.your_turn && state.room.winner === "empty";
+      els.hintRoomBtn.disabled = !canUseHint;
+      els.hintRoomBtn.textContent = state.room.hint_used ? "AI Hint Used" : "Use AI Hint";
+    }
+    renderHintPanel(state.room.active_hint || null);
     els.lastMoveLabel.textContent = formatMove(state.room.opponent_last_move);
     els.roomCodeLabel.textContent = state.room.code || "None";
     if (state.room.pending_undo_request) {
@@ -455,12 +509,19 @@ function updateInfo() {
     const showDecision = state.room.pending_undo_request && !state.room.pending_undo_from_you;
     els.acceptUndoBtn.classList.toggle("hidden", !showDecision);
     els.rejectUndoBtn.classList.toggle("hidden", !showDecision);
-    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    const suggestedMove = state.room.active_hint ? state.room.active_hint.move : null;
+    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null, suggestedMove);
     renderChat(state.room.chat_messages || []);
     return;
   }
 
   els.turnTimerLabel.textContent = "None";
+  els.hintUsageLabel.textContent = "None";
+  renderHintPanel(null);
+  if (els.hintRoomBtn) {
+    els.hintRoomBtn.disabled = true;
+    els.hintRoomBtn.textContent = "Use AI Hint";
+  }
   els.lastMoveLabel.textContent = "None";
   els.roomCodeLabel.textContent = "None";
   els.linkStateLabel.textContent = "Offline";
@@ -630,6 +691,22 @@ async function resetRoom() {
   updateInfo();
 }
 
+async function requestRoomHint() {
+  if (!state.roomCode) {
+    return setStatus("Join or create a room first.");
+  }
+  const data = await api("/api/rooms/hint", {
+    method: "POST",
+    body: JSON.stringify({ code: state.roomCode }),
+  });
+  state.room = data.room;
+  const moveText = state.room.active_hint && state.room.active_hint.move
+    ? formatMove(state.room.active_hint.move)
+    : "None";
+  setStatus(`AI hint ready: ${moveText}`);
+  updateInfo();
+}
+
 async function sendChat() {
   if (!state.roomCode) {
     return setStatus("Join or create a room first.");
@@ -719,11 +796,12 @@ els.board.addEventListener("mousemove", (event) => {
   const scaleY = els.board.height / rect.height;
   state.hoverPoint = fromCanvas((event.clientX - rect.left) * scaleX, (event.clientY - rect.top) * scaleY);
   if (state.mode === "local" && state.local) {
-    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null);
+    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null, null);
     return;
   }
   if (state.mode === "room" && state.room) {
-    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    const suggestedMove = state.room.active_hint ? state.room.active_hint.move : null;
+    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null, suggestedMove);
     return;
   }
 });
@@ -731,11 +809,12 @@ els.board.addEventListener("mousemove", (event) => {
 els.board.addEventListener("mouseleave", () => {
   state.hoverPoint = null;
   if (state.mode === "local" && state.local) {
-    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null);
+    drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null, null);
     return;
   }
   if (state.mode === "room" && state.room) {
-    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null);
+    const suggestedMove = state.room.active_hint ? state.room.active_hint.move : null;
+    drawBoard(state.room.board, state.room.your_turn ? state.room.opponent_last_move : null, suggestedMove);
   }
 });
 
@@ -747,6 +826,7 @@ els.startLocalBtn.addEventListener("click", () => startLocal().catch(handleApiEr
 els.undoLocalBtn.addEventListener("click", () => localUndo().catch(handleApiError));
 els.createRoomBtn.addEventListener("click", () => createRoom().catch(handleApiError));
 els.joinRoomBtn.addEventListener("click", () => joinRoom().catch(handleApiError));
+els.hintRoomBtn.addEventListener("click", () => requestRoomHint().catch(handleApiError));
 els.undoRoomBtn.addEventListener("click", () => roomUndo().catch(handleApiError));
 els.resetRoomBtn.addEventListener("click", () => resetRoom().catch(handleApiError));
 els.acceptUndoBtn.addEventListener("click", () => roomUndo("accept").catch(handleApiError));
