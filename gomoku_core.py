@@ -108,8 +108,9 @@ class GameBoard:
             return [Move(center, center)]
 
         moves: List[Move] = []
-        for x in range(self.size):
-            for y in range(self.size):
+        min_x, max_x, min_y, max_y = self.occupied_bounds(padding=2)
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
                 if self.cells[x][y] == EMPTY and self.has_neighbor(x, y):
                     moves.append(Move(x, y))
         return moves
@@ -142,6 +143,18 @@ class GameBoard:
     def state_key(self) -> Tuple[Tuple[int, ...], ...]:
         return tuple(tuple(row) for row in self.cells)
 
+    def occupied_bounds(self, padding: int = 1) -> Tuple[int, int, int, int]:
+        if not self.history:
+            return 0, self.size - 1, 0, self.size - 1
+
+        xs = [x for x, _y, _stone in self.history]
+        ys = [y for _x, y, _stone in self.history]
+        min_x = max(0, min(xs) - padding)
+        max_x = min(self.size - 1, max(xs) + padding)
+        min_y = max(0, min(ys) - padding)
+        max_y = min(self.size - 1, max(ys) + padding)
+        return min_x, max_x, min_y, max_y
+
 
 def opponent(stone: int) -> int:
     return WHITE if stone == BLACK else BLACK
@@ -154,9 +167,11 @@ class GomokuAI:
     def __init__(self, depth: int = 2) -> None:
         self.depth = max(1, depth)
         self._cache: Dict[Tuple[Tuple[Tuple[int, ...], ...], int, bool, int, int], int] = {}
+        self._move_score_cache: Dict[Tuple[Tuple[Tuple[int, ...], ...], int, Tuple[Tuple[int, int], ...]], List[Move]] = {}
 
     def best_move(self, board: GameBoard, ai_stone: int) -> Move:
         self._cache.clear()
+        self._move_score_cache.clear()
         forced = self._forced_move(board, ai_stone)
         if forced is not None:
             return forced
@@ -246,19 +261,16 @@ class GomokuAI:
         return value
 
     def _sorted_moves(self, board: GameBoard, moves: List[Move], stone: int) -> List[Move]:
-        enemy = opponent(stone)
-        for move in moves:
-            board.place(move.x, move.y, stone)
-            attack = self.evaluate_position(board, move.x, move.y, stone)
-            board.remove(move.x, move.y)
+        move_key = tuple(sorted((move.x, move.y) for move in moves))
+        cache_key = (board.state_key(), stone, move_key)
+        if cache_key in self._move_score_cache:
+            return [Move(move.x, move.y, move.score) for move in self._move_score_cache[cache_key]]
 
-            board.place(move.x, move.y, enemy)
-            defend = self.evaluate_position(board, move.x, move.y, enemy)
-            board.remove(move.x, move.y)
-
-            move.score = attack + defend // 2
-        moves.sort(key=lambda item: item.score, reverse=True)
-        return moves[:12]
+        moves = self._prefilter_moves(board, moves, stone)
+        ranked = self._rank_moves(board, moves, stone)
+        result = [Move(move.x, move.y, move.score) for move in ranked[:12]]
+        self._move_score_cache[cache_key] = result
+        return [Move(move.x, move.y, move.score) for move in result]
 
     def _candidate_moves(self, board: GameBoard, stone: int) -> List[Move]:
         moves = board.focused_candidate_moves()
@@ -291,8 +303,38 @@ class GomokuAI:
 
         return None
 
+    def _urgent_moves(self, board: GameBoard, stone: int) -> List[Move]:
+        focused = board.focused_candidate_moves(distance=3, limit_area=6)
+        broad = board.candidate_moves()
+
+        seen: set[Tuple[int, int]] = set()
+        merged: List[Move] = []
+        for move in focused + broad:
+            key = (move.x, move.y)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(Move(move.x, move.y))
+        return self._rank_moves(board, merged, stone)
+
+    def _rank_moves(self, board: GameBoard, moves: List[Move], stone: int) -> List[Move]:
+        ranked = [Move(move.x, move.y, move.score) for move in moves]
+        enemy = opponent(stone)
+        for move in ranked:
+            board.place(move.x, move.y, stone)
+            attack = self.evaluate_position(board, move.x, move.y, stone)
+            board.remove(move.x, move.y)
+
+            board.place(move.x, move.y, enemy)
+            defend = self.evaluate_position(board, move.x, move.y, enemy)
+            board.remove(move.x, move.y)
+
+            move.score = attack + defend // 2
+        ranked.sort(key=lambda item: item.score, reverse=True)
+        return ranked
+
     def _find_winning_move(self, board: GameBoard, stone: int) -> Optional[Move]:
-        for move in self._sorted_moves(board, board.focused_candidate_moves(distance=2, limit_area=3), stone):
+        for move in self._urgent_moves(board, stone):
             board.place(move.x, move.y, stone)
             is_win = board.winner == stone
             board.remove(move.x, move.y)
@@ -301,7 +343,7 @@ class GomokuAI:
         return None
 
     def _find_open_four_response(self, board: GameBoard, stone: int) -> Optional[Move]:
-        for move in self._sorted_moves(board, board.focused_candidate_moves(distance=2, limit_area=3), stone):
+        for move in self._urgent_moves(board, stone):
             board.place(move.x, move.y, stone)
             creates_threat = self._creates_major_threat(board, move.x, move.y, stone)
             board.remove(move.x, move.y)
@@ -321,8 +363,9 @@ class GomokuAI:
     def evaluate_board(self, board: GameBoard, ai_stone: int) -> int:
         enemy = opponent(ai_stone)
         score = 0
-        for x in range(board.size):
-            for y in range(board.size):
+        min_x, max_x, min_y, max_y = board.occupied_bounds(padding=1)
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
                 stone = board.get(x, y)
                 if stone == EMPTY:
                     continue
@@ -333,11 +376,39 @@ class GomokuAI:
 
     def _threat_score(self, board: GameBoard, stone: int) -> int:
         threat = 0
-        for move in board.candidate_moves():
+        for move in board.focused_candidate_moves(distance=2, limit_area=3)[:10]:
             board.place(move.x, move.y, stone)
             threat += self.evaluate_position(board, move.x, move.y, stone) // 8
             board.remove(move.x, move.y)
         return threat
+
+    def _prefilter_moves(self, board: GameBoard, moves: List[Move], stone: int) -> List[Move]:
+        if len(moves) <= 14:
+            return moves
+
+        enemy = opponent(stone)
+        center = board.size // 2
+        prescored: List[Move] = []
+        for move in moves:
+            center_bias = board.size - (abs(move.x - center) + abs(move.y - center))
+            adjacency = self._local_density(board, move.x, move.y, stone)
+            blocking = self._local_density(board, move.x, move.y, enemy)
+            prescored.append(Move(move.x, move.y, center_bias + adjacency * 18 + blocking * 15))
+        prescored.sort(key=lambda item: item.score, reverse=True)
+        return prescored[:14]
+
+    def _local_density(self, board: GameBoard, x: int, y: int, stone: int) -> int:
+        score = 0
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if not board.is_inside(nx, ny):
+                    continue
+                if board.get(nx, ny) == stone:
+                    score += 3 if abs(dx) <= 1 and abs(dy) <= 1 else 1
+        return score
 
     def evaluate_position(self, board: GameBoard, x: int, y: int, stone: int) -> int:
         center = board.size // 2

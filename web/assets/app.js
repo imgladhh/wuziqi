@@ -39,6 +39,9 @@ const els = {
   hintUsageLabel: document.getElementById("hintUsageLabel"),
   lastMoveLabel: document.getElementById("lastMoveLabel"),
   roomCodeLabel: document.getElementById("roomCodeLabel"),
+  roomBadge: document.getElementById("roomBadge"),
+  roomBadgeCode: document.getElementById("roomBadgeCode"),
+  copyRoomBadgeBtn: document.getElementById("copyRoomBadgeBtn"),
   linkStateLabel: document.getElementById("linkStateLabel"),
   depthSelect: document.getElementById("depthSelect"),
   startLocalBtn: document.getElementById("startLocalBtn"),
@@ -560,6 +563,8 @@ function updateInfo() {
     renderHintPanel(null);
     els.lastMoveLabel.textContent = formatMove(state.local.last_opponent_move);
     els.roomCodeLabel.textContent = "None";
+    els.roomBadge.classList.add("hidden");
+    els.roomBadgeCode.textContent = "------";
     els.linkStateLabel.textContent = "Offline";
     drawBoard(state.local.board, state.local.current_turn === "black" ? state.local.last_opponent_move : null, null);
     renderChat([]);
@@ -592,6 +597,8 @@ function updateInfo() {
     renderHintPanel(state.room.active_hint || null);
     els.lastMoveLabel.textContent = formatMove(state.room.opponent_last_move);
     els.roomCodeLabel.textContent = state.room.code || "None";
+    els.roomBadge.classList.toggle("hidden", !state.room.code);
+    els.roomBadgeCode.textContent = state.room.code || "------";
     if (state.room.pending_undo_request) {
       els.linkStateLabel.textContent = state.room.pending_undo_from_you ? "Waiting for undo reply" : "Undo request received";
     } else {
@@ -615,6 +622,8 @@ function updateInfo() {
   }
   els.lastMoveLabel.textContent = "None";
   els.roomCodeLabel.textContent = "None";
+  els.roomBadge.classList.add("hidden");
+  els.roomBadgeCode.textContent = "------";
   els.linkStateLabel.textContent = "Offline";
   renderChat([]);
 }
@@ -948,7 +957,7 @@ els.chatInput.addEventListener("keydown", (event) => {
 
 window.addEventListener("pagehide", leaveRoomOnUnload);
 
-els.copyRoomBtn.addEventListener("click", async () => {
+async function copyActiveRoomCode() {
   if (!state.roomCode && !els.roomCodeInput.value.trim()) {
     return state.screen === "online-setup"
       ? setSetupStatus("No room code available.")
@@ -961,7 +970,10 @@ els.copyRoomBtn.addEventListener("click", async () => {
   } else {
     setStatus(`Room code copied: ${code}`);
   }
-});
+}
+
+els.copyRoomBtn.addEventListener("click", () => copyActiveRoomCode().catch(handleApiError));
+els.copyRoomBadgeBtn.addEventListener("click", () => copyActiveRoomCode().catch(handleApiError));
 
 showScreen("landing");
 syncPanels();

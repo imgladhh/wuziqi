@@ -315,3 +315,87 @@ select, input {
   color: #2e4c61;
   line-height: 1.45;
 }
+
+.landing-shell,
+.setup-shell,
+.board-shell,
+.sidebar,
+.card,
+.mode-card {
+  border-radius: 22px;
+}
+
+.board-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.board-shell::after {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  border: 1px solid rgba(255, 248, 236, 0.35);
+  pointer-events: none;
+}
+
+.hero {
+  display: grid;
+  gap: 10px;
+}
+
+.card {
+  border: 1px solid rgba(23, 49, 59, 0.08);
+  box-shadow: 0 16px 28px rgba(49, 32, 16, 0.07);
+}
+
+.info-grid strong {
+  padding: 8px 10px;
+  background: rgba(201, 140, 63, 0.09);
+  border-radius: 12px;
+}
+
+.room-badge {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, #1d5a69, #2f7e68);
+  color: #fff8ec;
+  border-radius: 16px;
+}
+
+.room-badge-label {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 248, 236, 0.8);
+}
+
+#roomBadgeCode {
+  font-size: 26px;
+  letter-spacing: 0.18em;
+}
+
+#copyRoomBadgeBtn {
+  width: auto;
+  min-width: 110px;
+  background: rgba(255, 248, 236, 0.18);
+  border: 1px solid rgba(255, 248, 236, 0.28);
+}
+
+#copyRoomBadgeBtn:hover {
+  filter: brightness(1.08);
+}
+
+#onlineActions .inline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#status {
+  padding: 12px 14px;
+  background: rgba(243, 196, 109, 0.08);
+  border-left: 4px solid rgba(243, 196, 109, 0.85);
+}
