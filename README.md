@@ -1,100 +1,145 @@
 # 五子棋 Web 项目
 
-这是一个基于 Python 标准库实现的 Web 五子棋项目，包含：
+这是一个基于 Python 标准库实现的 Web 五子棋项目，支持本地人机和联网对战，并带有简单但完整的浏览器 UI。
 
-- 浏览器本地人机对局
-- 浏览器房间码联机对战
-- `minimax + 位置打分` AI
+## 当前功能
+
+- 本地人机对局
+- 联网房间对战
+- `minimax + alpha-beta 剪枝 + 位置评分` AI
 - 本地自由悔棋
-- 联机悔棋协商
+- 联机悔棋需对方同意
 - 联机房间文本聊天
-- 高亮显示对方上一手
+- 联机房间语音消息
+- 显示对方上一手位置
+- 联机每手读秒
+- 房主创建房间时可设置每手时限
+- 房间无操作自动过期
+- 每位玩家每局一次 AI 提示
+  - 会给出推荐落点
+  - 会解释为什么建议这样下
+  - 使用提示时当前回合读秒会临时暂停
 
 ## 主要文件
 
-- `web_server.py`: Python HTTP 服务与联机房间 API
-- `gomoku_core.py`: 棋盘规则、胜负判断、AI 搜索
-- `web/index.html`: Web 页面
-- `web/assets/app.js`: 前端交互和棋盘渲染
-- `web/assets/style.css`: 页面样式
-- `run_web_game.bat`: Windows 启动脚本
-- `render.yaml`: Render 部署配置
-- `requirements.txt`: Python 依赖声明
+- `web_server.py`：Python HTTP 服务、房间逻辑、联机 API
+- `gomoku_core.py`：棋盘规则、胜负判断、AI 搜索与提示解释
+- `web/index.html`：Web 页面结构
+- `web/assets/app.js`：前端交互、棋盘渲染、联机轮询
+- `web/assets/style.css`：页面样式
+- `render.yaml`：Render 部署配置
+- `requirements.txt`：依赖声明
 
-## 本地启动
+## 本地运行
 
-在 `E:\wuziqi` 下运行：
+在 `E:\wuziqi` 目录下运行：
+
+```powershell
+py .\web_server.py
+```
+
+如果你的环境里 `py` 不可用，也可以试：
 
 ```powershell
 python .\web_server.py
 ```
 
-或者直接双击：
-
-```bat
-run_web_game.bat
-```
-
-启动后浏览器访问：
+启动后在浏览器打开：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## GitHub + Render 快速部署
+如果前端代码刚更新过，建议进入页面后按一次：
 
-### 1. 推到 GitHub
+```text
+Ctrl + Shift + R
+```
 
-先把项目推到你的 GitHub 仓库。
+## 本地联机测试
 
-如果你本地已经装好 Git，典型流程是：
+同一台电脑上可以这样模拟两个玩家：
+
+1. 普通窗口打开 `http://127.0.0.1:8000`
+2. 无痕窗口再打开一次 `http://127.0.0.1:8000`
+3. 一边创建房间，另一边输入房间码加入
+
+## 联机说明
+
+### 创建房间
+
+1. 进入 `Online Mode`
+2. 输入昵称
+3. 选择每手时限
+4. 点击 `Create Room`
+
+### 加入房间
+
+1. 打开同一个网页地址
+2. 输入昵称
+3. 输入房间码
+4. 点击 `Join Room`
+
+## AI 提示规则
+
+- 仅联网对战可用
+- 每位玩家每局最多使用一次
+- 只能在轮到自己时使用
+- 使用后会显示推荐坐标和原因说明
+- 使用提示时，本回合读秒会暂时暂停
+
+相关可调参数：
+
+- `ROOM_HINT_PAUSE_SECONDS`
+  - 默认值：`20`
+  - 含义：使用 AI 提示后读秒暂停的秒数
+
+## 房间与计时规则
+
+- 房间数据保存在内存中，服务重启后房间会失效
+- 房间默认 `30` 分钟无活动自动过期
+- 默认每手时限由房主创建房间时选择
+- 若超时未落子，对手直接判胜
+
+可调环境变量：
+
+- `HOST`
+- `PORT`
+- `ROOM_TTL_SECONDS`
+- `ROOM_TURN_LIMIT_SECONDS`
+- `ROOM_HINT_PAUSE_SECONDS`
+
+## 语音消息说明
+
+- 语音消息是“房间语音留言”，不是实时语音通话
+- 浏览器需要麦克风权限
+- 当前单条语音最长 `15` 秒
+- 如果系统或浏览器禁用了麦克风，发送会失败
+
+## Render 部署
+
+### 推送到 GitHub
 
 ```powershell
 cd E:\wuziqi
-git init
 git add .
-git commit -m "Initial web gomoku app"
-git branch -M main
-git remote add origin <your-repo-url>
-git push -u origin main
+git commit -m "Update gomoku web app"
+git push
 ```
 
-### 2. 在 Render 创建 Web Service
+### 在 Render 部署
 
 1. 打开 [Render](https://render.com/)
 2. 选择 `New +`
-3. 选择 `Blueprint` 或 `Web Service`
-4. 连接你的 GitHub 仓库
-5. 选中这个项目仓库
+3. 选择 `Blueprint`
+4. 连接 GitHub 仓库
+5. 选择本项目仓库
+6. 部署
 
-如果使用 `Blueprint`，Render 会直接读取项目里的 `render.yaml`。
+项目已经包含 `render.yaml`，Render 会自动读取配置。
 
-当前配置是：
+## 已知说明
 
-- Runtime: Python
-- Start Command: `python web_server.py`
-- Port: 由 Render 注入 `PORT` 环境变量
-
-### 3. 部署完成后访问公网地址
-
-Render 会分配一个类似下面的公网地址：
-
-```text
-https://wuziqi-web.onrender.com
-```
-
-你和朋友都打开这个地址，就可以通过房间码联机。
-
-## 联机方式
-
-1. 房主打开网页，点击“创建房间”
-2. 页面会生成一个 6 位房间码
-3. 把房间码发给朋友
-4. 朋友访问同一个网页地址，输入房间码后点击“加入房间”
-
-## 说明
-
-- 当前服务端数据保存在内存中，服务重启后房间会清空
-- 本地默认监听端口是 `8000`
-- 部署到 Render 时会自动读取平台注入的 `PORT`
-- 房间默认 30 分钟无活动自动过期，可通过环境变量 `ROOM_TTL_SECONDS` 调整
+- 当前联机使用轮询同步，不是 WebSocket
+- 免费 Render 实例可能会休眠，首次访问会稍慢
+- 浏览器缓存旧前端资源时，可能需要强制刷新页面
