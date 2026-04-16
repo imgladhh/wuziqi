@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 from aiohttp import WSMsgType, web
 
-from gomoku_core import BLACK, EMPTY, WHITE, GameBoard, GomokuAI, opponent
+from gomoku_core import BLACK, EMPTY, WHITE, GameBoard, GomokuAI, forbidden_reason, is_forbidden_move, opponent
 
 
 ROOT = Path(__file__).parent
@@ -141,12 +141,14 @@ class LocalGame:
     depth: int = 2
     current_turn: int = BLACK
     last_opponent_move: Optional[tuple[int, int]] = None
+    competitive_mode: bool = False
 
-    def reset(self, depth: int) -> None:
+    def reset(self, depth: int, competitive_mode: bool = False) -> None:
         self.board.reset()
         self.depth = depth
         self.current_turn = BLACK
         self.last_opponent_move = None
+        self.competitive_mode = competitive_mode
 
 
 @dataclass
@@ -170,6 +172,7 @@ class Room:
     hint_pause_until: int = 0
     hint_pause_time_left: int = 0
     match_entered: bool = False
+    competitive_mode: bool = False
 
     def reset(self) -> None:
         self.board.reset()
@@ -206,6 +209,7 @@ class GameStore:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.local_games: Dict[str, LocalGame] = {}
+        self.local_clients: Dict[str, set[web.WebSocketResponse]] = {}
         self.rooms: Dict[str, Room] = {}
         self.room_clients: Dict[str, Dict[web.WebSocketResponse, str]] = {}
 
@@ -213,6 +217,20 @@ class GameStore:
         if session_id not in self.local_games:
             self.local_games[session_id] = LocalGame()
         return self.local_games[session_id]
+
+    def register_local_ws(self, session_id: str, ws: web.WebSocketResponse) -> None:
+        self.local_clients.setdefault(session_id, set()).add(ws)
+
+    def unregister_local_ws(self, session_id: str, ws: web.WebSocketResponse) -> None:
+        clients = self.local_clients.get(session_id)
+        if not clients:
+            return
+        clients.discard(ws)
+        if not clients:
+            self.local_clients.pop(session_id, None)
+
+    def local_client_list(self, session_id: str) -> list[web.WebSocketResponse]:
+        return list(self.local_clients.get(session_id, set()))
 
     def create_room(self, session_id: str, name: str, turn_limit_seconds: int) -> Room:
         self.prune_expired_rooms()
@@ -275,6 +293,7 @@ def local_state_payload(game: LocalGame) -> dict[str, Any]:
         "current_turn": stone_name(game.current_turn),
         "last_opponent_move": list(game.last_opponent_move) if game.last_opponent_move else None,
         "move_count": game.board.move_count,
+        "competitive_mode": game.competitive_mode,
     }
 
 
@@ -314,6 +333,7 @@ def room_state_payload(room: Room, session_id: str) -> dict[str, Any]:
         "move_count": room.board.move_count,
         "hint_used": session_id in room.hints_used,
         "active_hint": room.hint_details.get(session_id),
+        "competitive_mode": room.competitive_mode,
         "chat_messages": [
             {
                 "sender": msg["sender"],
@@ -358,10 +378,12 @@ async def local_new(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
     depth = int(body.get("depth", 2))
+    competitive_mode = bool(body.get("competitive_mode", False))
     with STORE.lock:
         game = STORE.get_local(session_id)
-        game.reset(depth)
+        game.reset(depth, competitive_mode=competitive_mode)
         payload = local_state_payload(game)
+    await broadcast_local(session_id)
     return json_response({"ok": True, "state": payload}, session_id)
 
 
@@ -378,6 +400,15 @@ async def local_move(request: web.Request) -> web.Response:
     x, y = int(body["x"]), int(body["y"])
     with STORE.lock:
         game = STORE.get_local(session_id)
+        if game.competitive_mode:
+            reason = forbidden_reason(game.board, x, y, BLACK)
+            if reason is not None:
+                reason_map = {
+                    "overline": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u957f\u8fde\uff086\u5b50\u53ca\u4ee5\u4e0a\uff09\u3002",
+                    "double_four": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u56db\u56db\u3002",
+                    "double_three": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u4e09\u4e09\u3002",
+                }
+                return json_response({"ok": False, "error": reason_map.get(reason, "\u7981\u624b\uff1a\u8fd9\u4e00\u624b\u4e0d\u5408\u6cd5\u3002")}, session_id, 400)
         if game.current_turn != BLACK or not game.board.place(x, y, BLACK):
             return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         game.current_turn = WHITE
@@ -388,6 +419,7 @@ async def local_move(request: web.Request) -> web.Response:
                 game.last_opponent_move = (move.x, move.y)
             game.current_turn = BLACK
         payload = local_state_payload(game)
+    await broadcast_local(session_id)
     return json_response({"ok": True, "state": payload}, session_id)
 
 
@@ -408,7 +440,32 @@ async def local_undo(request: web.Request) -> web.Response:
                 game.last_opponent_move = (x, y)
                 break
         payload = local_state_payload(game)
+    await broadcast_local(session_id)
     return json_response({"ok": undone > 0, "state": payload}, session_id)
+
+
+async def websocket_local(request: web.Request) -> web.StreamResponse:
+    session_id = request_session_id(request)
+    ws = web.WebSocketResponse(heartbeat=25)
+    await ws.prepare(request)
+
+    with STORE.lock:
+        game = STORE.get_local(session_id)
+        STORE.register_local_ws(session_id, ws)
+        payload = local_state_payload(game)
+
+    await ws.send_json({"type": "local_state", "state": payload})
+
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT and msg.data == "ping":
+                await ws.send_str("pong")
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        with STORE.lock:
+            STORE.unregister_local_ws(session_id, ws)
+    return ws
 
 
 async def create_room(request: web.Request) -> web.Response:
@@ -417,8 +474,10 @@ async def create_room(request: web.Request) -> web.Response:
     name = str(body.get("name", "\u623f\u4e3b")).strip() or "\u623f\u4e3b"
     turn_limit_seconds = int(body.get("turn_limit_seconds", DEFAULT_ROOM_TURN_LIMIT_SECONDS))
     turn_limit_seconds = max(10, min(300, turn_limit_seconds))
+    competitive_mode = bool(body.get("competitive_mode", False))
     with STORE.lock:
         room = STORE.create_room(session_id, name, turn_limit_seconds)
+        room.competitive_mode = competitive_mode
         payload = room_state_payload(room, session_id)
     await broadcast_room(room.code)
     return json_response({"ok": True, "room": payload}, session_id)
@@ -496,6 +555,15 @@ async def room_move(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u623f\u4e3b\u8fd8\u6ca1\u6709\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
         if room_winner(room) != EMPTY:
             return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
+        if room.competitive_mode and stone == BLACK:
+            reason = forbidden_reason(room.board, x, y, BLACK)
+            if reason is not None:
+                reason_map = {
+                    "overline": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u957f\u8fde\uff086\u5b50\u53ca\u4ee5\u4e0a\uff09\u3002",
+                    "double_four": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u56db\u56db\u3002",
+                    "double_three": "\u7981\u624b\uff1a\u9ed1\u68cb\u4e0d\u53ef\u8d70\u4e09\u4e09\u3002",
+                }
+                return json_response({"ok": False, "error": reason_map.get(reason, "\u7981\u624b\uff1a\u8fd9\u4e00\u624b\u4e0d\u5408\u6cd5\u3002")}, session_id, 400)
         if room.current_turn != stone or not room.board.place(x, y, stone):
             return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         room.current_turn = opponent(stone)
@@ -587,8 +655,11 @@ async def room_hint(request: web.Request) -> web.Response:
         if session_id in room.hints_used:
             return json_response({"ok": False, "error": "\u4f60\u672c\u5c40\u5df2\u7ecf\u4f7f\u7528\u8fc7 AI \u63d0\u793a\u3002"}, session_id, 400)
         remaining_before_pause = room_time_left(room)
-        ai = GomokuAI(depth=3)
+        legal_checker = is_forbidden_move if room.competitive_mode else None
+        ai = GomokuAI(depth=3, legal_move_checker=(lambda b, px, py, s: not legal_checker(b, px, py, s)) if legal_checker else None)
         move, reason = ai.suggest_move(room.board, stone)
+        if room.competitive_mode and stone == BLACK and is_forbidden_move(room.board, move.x, move.y, stone):
+            return json_response({"ok": False, "error": "\u5f53\u524d\u5c40\u9762\u6682\u65e0\u5408\u6cd5\u7684 AI \u5efa\u8bae\u843d\u70b9\u3002"}, session_id, 400)
         room.hints_used.add(session_id)
         room.hint_details[session_id] = {
             "move": [move.x, move.y],
@@ -741,6 +812,28 @@ async def broadcast_room(code: str) -> None:
                 STORE.unregister_ws(code, ws)
 
 
+async def broadcast_local(session_id: str) -> None:
+    with STORE.lock:
+        game = STORE.get_local(session_id)
+        payload = {"type": "local_state", "state": local_state_payload(game)}
+        clients = STORE.local_client_list(session_id)
+
+    stale: list[web.WebSocketResponse] = []
+    for ws in clients:
+        if ws.closed:
+            stale.append(ws)
+            continue
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            stale.append(ws)
+
+    if stale:
+        with STORE.lock:
+            for ws in stale:
+                STORE.unregister_local_ws(session_id, ws)
+
+
 async def room_push_loop(_app: web.Application) -> None:
     while True:
         await asyncio.sleep(1)
@@ -766,6 +859,7 @@ async def cleanup_background_tasks(app: web.Application) -> None:
 app = web.Application()
 app.router.add_get("/", index)
 app.router.add_static("/assets/", path=STATIC_DIR / "assets")
+app.router.add_get("/ws/local", websocket_local)
 app.router.add_get("/ws", websocket_room)
 app.router.add_get("/api/local/state", local_state)
 app.router.add_get("/api/rooms/state", room_state)

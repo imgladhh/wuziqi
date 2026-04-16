@@ -1,127 +1,159 @@
 # 五子棋 Web 项目
 
-这是一个基于 Python 实现的 Web 五子棋项目，支持本地人机和联网对战，并带有简单但完整的浏览器 UI。
+这是一个基于 Python 的五子棋 Web 项目，支持本地人机与联机对战，提供简洁 UI、联机实时同步、聊天、AI 提示和竞技规则。
 
-## 当前功能
+## 主要功能
 
 - 本地人机对局
-- 联网房间对战
-- `minimax + alpha-beta 剪枝 + 位置评分` AI
-- 本地自由悔棋
-- 联机悔棋需对方同意
-- 联机房间文本聊天
-- 联机房间语音消息
+- 联机房间对战（房间码）
 - 联机 WebSocket 实时同步
-- 显示对方上一手位置
-- 联机每手读秒
-- 房主创建房间时可设置每手时限
-- 房间无操作自动过期
-- 每位玩家每局一次 AI 提示
-  - 会给出推荐落点
-  - 会解释为什么建议这样下
-  - 使用提示时当前回合读秒会临时暂停
+- 本地 WebSocket 实时同步（HTTP 兜底）
+- `minimax + alpha-beta + 局面评分` AI
+- AI 提示（每局每人一次）
+- 本地悔棋
+- 联机悔棋（需对方同意）
+- 联机聊天（文本 + 语音消息）
+- 每手读秒（房主创建房间时可配置）
+- 房间空闲自动过期
+- 竞技模式（黑棋禁手：长连 / 四四 / 三三）
 
-## 主要文件
+## 竞技模式说明
 
-- `web_server.py`：Python HTTP 服务、房间逻辑、联机 API
-- `gomoku_core.py`：棋盘规则、胜负判断、AI 搜索与提示解释
-- `web/index.html`：Web 页面结构
-- `web/assets/app.js`：前端交互、棋盘渲染、联机轮询
+项目支持“竞技五子棋”开关：
+
+- 本地模式：可在开始本地对局前选择是否开启竞技模式。
+- 联机模式：房主创建房间时可选择是否开启竞技模式（全房间生效）。
+
+开启竞技模式后：
+
+- 黑棋落子会执行禁手判定：
+  - 长连（overline，6 子及以上）
+  - 四四（double-four）
+  - 三三（double-three）
+- 白棋不受禁手限制。
+- AI 落子与 AI 提示会自动规避禁手。
+
+> 规则参考：
+> - https://www.renju.net/rules/
+> - https://oconvertor.com/blog/gomoku-competitive-forbidden-moves-guide
+
+## AI 能力增强
+
+当前 AI 在原有 minimax/alpha-beta 基础上新增：
+
+- 合法落子约束接口（竞技模式下禁手过滤）
+- 威胁分叉（fork）奖励（更重视可形成多重威胁的点）
+- 强制手优先逻辑（即时取胜/必防）
+- 候选点预筛与排序缓存
+
+## 项目结构
+
+- `web_server.py`：HTTP / WebSocket 服务、房间与对局状态管理
+- `gomoku_core.py`：棋盘规则、禁手判定、AI 搜索与评估
+- `web/index.html`：页面结构
+- `web/assets/app.js`：前端交互、棋盘渲染、联机/本地 WS 同步
 - `web/assets/style.css`：页面样式
+- `tests/test_gomoku_competitive.py`：竞技规则与 AI 合法性测试
 - `render.yaml`：Render 部署配置
-- `requirements.txt`：依赖声明
+- `requirements.txt`：Python 依赖
 
 ## 本地运行
 
-在 `E:\wuziqi` 目录下运行：
-
-```powershell
-py .\web_server.py
-```
-
-如果你的环境里 `py` 不可用，也可以试：
+在 `E:\wuziqi` 目录执行：
 
 ```powershell
 python .\web_server.py
 ```
 
-首次安装依赖：
+如果你的环境使用 `py`：
 
 ```powershell
-py -m pip install -r .\requirements.txt
+py .\web_server.py
 ```
 
-启动后在浏览器打开：
+安装依赖：
+
+```powershell
+python -m pip install -r .\requirements.txt
+```
+
+浏览器访问：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-如果前端代码刚更新过，建议进入页面后按一次：
+前端更新后建议强刷：
 
 ```text
 Ctrl + Shift + R
 ```
 
-## 本地联机测试
+## 测试
 
-同一台电脑上可以这样模拟两个玩家：
+运行竞技规则相关测试：
 
-1. 普通窗口打开 `http://127.0.0.1:8000`
-2. 无痕窗口再打开一次 `http://127.0.0.1:8000`
-3. 一边创建房间，另一边输入房间码加入
+```powershell
+python -m unittest -q tests.test_gomoku_competitive
+```
 
-## 联机说明
+语法检查：
+
+```powershell
+python -m py_compile .\gomoku_core.py .\web_server.py
+node --check .\web\assets\app.js
+```
+
+## 联机玩法
 
 ### 创建房间
 
-1. 进入 `Online Mode`
+1. 进入联机大厅
 2. 输入昵称
 3. 选择每手时限
-4. 点击 `Create Room`
+4. 选择是否开启竞技模式
+5. 点击“创建房间”
 
 ### 加入房间
 
-1. 打开同一个网页地址
-2. 输入昵称
-3. 输入房间码
-4. 点击 `Join Room`
+1. 输入昵称
+2. 输入房间码
+3. 点击“加入房间”
+
+### 进入对局
+
+- 只有房主点击“进入对局”后，双方才会进入棋盘页面。
+
+### 退出对局
+
+- 对局页右上角可“退出棋局”。
+- 一方退出后自己立即返回大厅，另一方会收到提示并在 3 秒后自动返回大厅。
 
 ## AI 提示规则
 
-- 仅联网对战可用
-- 每位玩家每局最多使用一次
-- 只能在轮到自己时使用
-- 使用后会显示推荐坐标和原因说明
-- 使用提示时，本回合读秒会暂时暂停
+- 仅联机模式可用
+- 每位玩家每局最多一次
+- 仅在自己回合可用
+- 返回推荐坐标与原因
+- 使用时当前回合读秒会暂停
 
-相关可调参数：
+相关参数：
 
-- `ROOM_HINT_PAUSE_SECONDS`
-  - 默认值：`20`
-  - 含义：使用 AI 提示后读秒暂停的秒数
+- `ROOM_HINT_PAUSE_SECONDS`（默认 `20`）
 
 ## 房间与计时规则
 
 - 房间数据保存在内存中，服务重启后房间会失效
 - 房间默认 `30` 分钟无活动自动过期
-- 默认每手时限由房主创建房间时选择
-- 若超时未落子，对手直接判胜
+- 超时未落子：对手超时胜
 
-可调环境变量：
+相关环境变量：
 
 - `HOST`
 - `PORT`
 - `ROOM_TTL_SECONDS`
 - `ROOM_TURN_LIMIT_SECONDS`
 - `ROOM_HINT_PAUSE_SECONDS`
-
-## 语音消息说明
-
-- 语音消息是“房间语音留言”，不是实时语音通话
-- 浏览器需要麦克风权限
-- 当前单条语音最长 `15` 秒
-- 如果系统或浏览器禁用了麦克风，发送会失败
 
 ## Render 部署
 
@@ -136,17 +168,13 @@ git push
 
 ### 在 Render 部署
 
-1. 打开 [Render](https://render.com/)
-2. 选择 `New +`
-3. 选择 `Blueprint`
-4. 连接 GitHub 仓库
-5. 选择本项目仓库
-6. 部署
-
-项目已经包含 `render.yaml`，Render 会自动读取配置。
+1. 打开 https://render.com/
+2. `New +` -> `Blueprint`
+3. 连接 GitHub 仓库
+4. 选择本项目仓库
+5. 直接部署（读取 `render.yaml`）
 
 ## 已知说明
 
-- 当前联机已经改为 WebSocket 实时同步，本地模式仍然使用普通 HTTP 状态获取
-- 免费 Render 实例可能会休眠，首次访问会稍慢
-- 浏览器缓存旧前端资源时，可能需要强制刷新页面
+- Render 免费实例可能休眠，首次访问会较慢
+- 浏览器缓存旧资源时可能需强制刷新

@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 EMPTY = 0
@@ -83,6 +83,13 @@ class GameBoard:
                 return True
         return False
 
+    def has_overline(self, x: int, y: int, stone: int) -> bool:
+        for dx, dy in DIRECTIONS:
+            total = 1 + self._count_direction(x, y, dx, dy, stone) + self._count_direction(x, y, -dx, -dy, stone)
+            if total >= 6:
+                return True
+        return False
+
     def _count_direction(self, x: int, y: int, dx: int, dy: int, stone: int) -> int:
         count = 0
         cx, cy = x + dx, y + dy
@@ -155,6 +162,82 @@ class GameBoard:
         max_y = min(self.size - 1, max(ys) + padding)
         return min_x, max_x, min_y, max_y
 
+    def immediate_winning_points(self, stone: int, limit: Optional[int] = None) -> List[Tuple[int, int]]:
+        points: List[Tuple[int, int]] = []
+        for move in self.candidate_moves():
+            self.place(move.x, move.y, stone)
+            is_win = self.winner == stone
+            self.remove(move.x, move.y)
+            if is_win:
+                points.append((move.x, move.y))
+                if limit is not None and len(points) >= limit:
+                    break
+        return points
+
+    def straight_four_points(self, stone: int, limit: Optional[int] = None) -> List[Tuple[int, int]]:
+        points: List[Tuple[int, int]] = []
+        for move in self.candidate_moves():
+            self.place(move.x, move.y, stone)
+            makes_straight_four = self._move_makes_straight_four(move.x, move.y, stone)
+            self.remove(move.x, move.y)
+            if makes_straight_four:
+                points.append((move.x, move.y))
+                if limit is not None and len(points) >= limit:
+                    break
+        return points
+
+    def _move_makes_straight_four(self, x: int, y: int, stone: int) -> bool:
+        for dx, dy in DIRECTIONS:
+            count_pos = self._count_direction(x, y, dx, dy, stone)
+            count_neg = self._count_direction(x, y, -dx, -dy, stone)
+            total = 1 + count_pos + count_neg
+            if total != 4:
+                continue
+            end_pos_x = x + (count_pos + 1) * dx
+            end_pos_y = y + (count_pos + 1) * dy
+            end_neg_x = x - (count_neg + 1) * dx
+            end_neg_y = y - (count_neg + 1) * dy
+            open_pos = self.is_inside(end_pos_x, end_pos_y) and self.get(end_pos_x, end_pos_y) == EMPTY
+            open_neg = self.is_inside(end_neg_x, end_neg_y) and self.get(end_neg_x, end_neg_y) == EMPTY
+            if open_pos and open_neg:
+                return True
+        return False
+
+
+def forbidden_reason(board: GameBoard, x: int, y: int, stone: int) -> Optional[str]:
+    if stone != BLACK:
+        return None
+    if not board.is_inside(x, y) or board.get(x, y) != EMPTY:
+        return None
+
+    base_wins = set(board.immediate_winning_points(BLACK))
+    base_straight_fours = set(board.straight_four_points(BLACK))
+
+    board.place(x, y, BLACK)
+    try:
+        if board.has_overline(x, y, BLACK):
+            return "overline"
+
+        # Common competitive Renju handling:
+        # A direct five is legal unless the move is an overline.
+        if board.winner == BLACK:
+            return None
+
+        new_wins = set(board.immediate_winning_points(BLACK))
+        if len(new_wins - base_wins) >= 2:
+            return "double_four"
+
+        new_straight_fours = set(board.straight_four_points(BLACK))
+        if len(new_straight_fours - base_straight_fours) >= 2:
+            return "double_three"
+    finally:
+        board.remove(x, y)
+    return None
+
+
+def is_forbidden_move(board: GameBoard, x: int, y: int, stone: int) -> bool:
+    return forbidden_reason(board, x, y, stone) is not None
+
 
 def opponent(stone: int) -> int:
     return WHITE if stone == BLACK else BLACK
@@ -164,10 +247,15 @@ class GomokuAI:
     WIN_SCORE = 10_000_000
     FORCE_SCORE = WIN_SCORE // 2
 
-    def __init__(self, depth: int = 2) -> None:
+    def __init__(
+        self,
+        depth: int = 2,
+        legal_move_checker: Optional[Callable[[GameBoard, int, int, int], bool]] = None,
+    ) -> None:
         self.depth = max(1, depth)
         self._cache: Dict[Tuple[Tuple[Tuple[int, ...], ...], int, bool, int, int], int] = {}
         self._move_score_cache: Dict[Tuple[Tuple[Tuple[int, ...], ...], int, Tuple[Tuple[int, int], ...]], List[Move]] = {}
+        self._legal_move_checker = legal_move_checker
 
     def best_move(self, board: GameBoard, ai_stone: int) -> Move:
         self._cache.clear()
@@ -179,6 +267,8 @@ class GomokuAI:
         best: Optional[Move] = None
         best_score = -10**18
         for move in self._sorted_moves(board, self._candidate_moves(board, ai_stone), ai_stone):
+            if not self._is_legal_move(board, move.x, move.y, ai_stone):
+                continue
             board.place(move.x, move.y, ai_stone)
             score = self.WIN_SCORE if board.winner == ai_stone else self._minimax(
                 board,
@@ -193,7 +283,12 @@ class GomokuAI:
             if score > best_score:
                 best_score = score
                 best = Move(move.x, move.y, score)
-        return best or Move(board.size // 2, board.size // 2)
+        if best is not None:
+            return best
+        for move in board.candidate_moves():
+            if self._is_legal_move(board, move.x, move.y, ai_stone):
+                return Move(move.x, move.y)
+        return Move(board.size // 2, board.size // 2)
 
     def suggest_move(self, board: GameBoard, ai_stone: int) -> Tuple[Move, str]:
         move = self.best_move(board, ai_stone)
@@ -234,6 +329,8 @@ class GomokuAI:
         if maximizing:
             value = -10**18
             for move in moves:
+                if not self._is_legal_move(board, move.x, move.y, current_stone):
+                    continue
                 board.place(move.x, move.y, current_stone)
                 score = self.WIN_SCORE - (self.depth - depth) if board.winner == current_stone else self._minimax(
                     board, depth - 1, False, ai_stone, opponent(current_stone), alpha, beta
@@ -248,6 +345,8 @@ class GomokuAI:
 
         value = 10**18
         for move in moves:
+            if not self._is_legal_move(board, move.x, move.y, current_stone):
+                continue
             board.place(move.x, move.y, current_stone)
             score = -self.WIN_SCORE + (self.depth - depth) if board.winner == current_stone else self._minimax(
                 board, depth - 1, True, ai_stone, opponent(current_stone), alpha, beta
@@ -321,12 +420,17 @@ class GomokuAI:
         ranked = [Move(move.x, move.y, move.score) for move in moves]
         enemy = opponent(stone)
         for move in ranked:
+            if not self._is_legal_move(board, move.x, move.y, stone):
+                move.score = -10**17
+                continue
             board.place(move.x, move.y, stone)
             attack = self.evaluate_position(board, move.x, move.y, stone)
+            attack += self._fork_bonus(board, stone)
             board.remove(move.x, move.y)
 
             board.place(move.x, move.y, enemy)
             defend = self.evaluate_position(board, move.x, move.y, enemy)
+            defend += self._fork_bonus(board, enemy)
             board.remove(move.x, move.y)
 
             move.score = attack + defend // 2
@@ -335,6 +439,8 @@ class GomokuAI:
 
     def _find_winning_move(self, board: GameBoard, stone: int) -> Optional[Move]:
         for move in self._urgent_moves(board, stone):
+            if not self._is_legal_move(board, move.x, move.y, stone):
+                continue
             board.place(move.x, move.y, stone)
             is_win = board.winner == stone
             board.remove(move.x, move.y)
@@ -344,12 +450,27 @@ class GomokuAI:
 
     def _find_open_four_response(self, board: GameBoard, stone: int) -> Optional[Move]:
         for move in self._urgent_moves(board, stone):
+            if not self._is_legal_move(board, move.x, move.y, stone):
+                continue
             board.place(move.x, move.y, stone)
             creates_threat = self._creates_major_threat(board, move.x, move.y, stone)
             board.remove(move.x, move.y)
             if creates_threat:
                 return Move(move.x, move.y, self.FORCE_SCORE // 2)
         return None
+
+    def _fork_bonus(self, board: GameBoard, stone: int) -> int:
+        wins = len(board.immediate_winning_points(stone, limit=3))
+        if wins >= 2:
+            return 250_000
+        if wins == 1:
+            return 60_000
+        return 0
+
+    def _is_legal_move(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        if self._legal_move_checker is None:
+            return True
+        return self._legal_move_checker(board, x, y, stone)
 
     def _creates_major_threat(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
         for dx, dy in DIRECTIONS:
@@ -486,7 +607,7 @@ class GomokuAI:
         if creates_major_threat:
             return "这一手会形成强制进攻，通常是活三或活四，对手必须应对。"
         if longest_line >= 4:
-            return "这一手把你的主攻线扩展到四子，下一步就会形成很强的胜势。"
+            return "这一手把你的主攻线扩展到四子，下一步会形成很强的胜势。"
         if longest_line == 3 and best_open_ends >= 1:
             return "这一手把主攻方向推进到三子，并且后续还有继续延展的空间。"
         return "这一手能提升棋盘控制力，呼应附近棋子，并保留更强的后续变化。"

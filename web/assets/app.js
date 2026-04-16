@@ -19,6 +19,9 @@ const state = {
   roomSocket: null,
   roomSocketReconnect: null,
   suppressSocketReconnect: false,
+  localSocket: null,
+  localSocketReconnect: null,
+  suppressLocalSocketReconnect: false,
   returnToSetupTimer: null,
 };
 
@@ -45,6 +48,7 @@ const els = {
   undoLocalBtn: document.getElementById("undoLocalBtn"),
   playerNameInput: document.getElementById("playerNameInput"),
   turnLimitSelect: document.getElementById("turnLimitSelect"),
+  onlineCompetitiveMode: document.getElementById("onlineCompetitiveMode"),
   createRoomBtn: document.getElementById("createRoomBtn"),
   roomCodeInput: document.getElementById("roomCodeInput"),
   joinRoomBtn: document.getElementById("joinRoomBtn"),
@@ -63,6 +67,7 @@ const els = {
   hintMoveLabel: document.getElementById("hintMoveLabel"),
   hintReasonLabel: document.getElementById("hintReasonLabel"),
   localActions: document.getElementById("localActions"),
+  localCompetitiveSelect: document.getElementById("localCompetitiveSelect"),
   onlineActions: document.getElementById("onlineActions"),
   chatCard: document.getElementById("chatCard"),
   chatMessages: document.getElementById("chatMessages"),
@@ -391,6 +396,81 @@ function roomSocketOpen() {
   return !!state.roomSocket && state.roomSocket.readyState === WebSocket.OPEN;
 }
 
+function localSocketOpen() {
+  return !!state.localSocket && state.localSocket.readyState === WebSocket.OPEN;
+}
+
+function disconnectLocalSocket({ suppressReconnect = true } = {}) {
+  if (state.localSocketReconnect) {
+    clearTimeout(state.localSocketReconnect);
+    state.localSocketReconnect = null;
+  }
+  state.suppressLocalSocketReconnect = suppressReconnect;
+  if (state.localSocket) {
+    const socket = state.localSocket;
+    state.localSocket = null;
+    try {
+      socket.close();
+    } catch (_error) {
+      // ignore
+    }
+  }
+}
+
+function scheduleLocalSocketReconnect() {
+  if (state.localSocketReconnect || state.suppressLocalSocketReconnect || state.mode !== "local" || state.screen !== "game") {
+    return;
+  }
+  state.localSocketReconnect = setTimeout(() => {
+    state.localSocketReconnect = null;
+    connectLocalSocket();
+  }, 1200);
+}
+
+function handleLocalSocketMessage(payload) {
+  if (payload.type === "local_state" && payload.state) {
+    state.local = payload.state;
+    updateInfo();
+    return;
+  }
+  if (payload.type === "local_closed") {
+    disconnectLocalSocket();
+  }
+}
+
+function connectLocalSocket() {
+  if (typeof WebSocket === "undefined" || !state.sessionId || state.mode !== "local" || state.screen !== "game") {
+    return;
+  }
+  if (localSocketOpen()) return;
+
+  disconnectLocalSocket({ suppressReconnect: false });
+  state.suppressLocalSocketReconnect = false;
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${protocol}://${location.host}/ws/local?session=${encodeURIComponent(state.sessionId)}`;
+  const socket = new WebSocket(url);
+  state.localSocket = socket;
+
+  socket.addEventListener("open", () => {
+    if (state.localSocket === socket) updateInfo();
+  });
+
+  socket.addEventListener("message", (event) => {
+    try {
+      handleLocalSocketMessage(JSON.parse(event.data));
+    } catch (_error) {
+      setStatus("收到了一条无效的本地实时消息。");
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (state.localSocket === socket) state.localSocket = null;
+    if (!state.suppressLocalSocketReconnect) {
+      scheduleLocalSocketReconnect();
+    }
+  });
+}
+
 function disconnectRoomSocket({ suppressReconnect = true } = {}) {
   if (state.roomSocketReconnect) {
     clearTimeout(state.roomSocketReconnect);
@@ -478,18 +558,21 @@ async function loadLocalState() {
 
 async function startLocal() {
   const depth = Number.parseInt(els.depthSelect.value, 10) || 2;
+  const competitiveMode = els.localCompetitiveSelect.value === "on";
   const payload = await api("/api/local/new", {
     method: "POST",
-    body: JSON.stringify({ depth }),
+    body: JSON.stringify({ depth, competitive_mode: competitiveMode }),
   });
   state.mode = "local";
   state.local = payload.state;
   state.room = null;
   state.roomCode = "";
   disconnectRoomSocket();
+  disconnectLocalSocket({ suppressReconnect: false });
   clearReturnToSetupTimer();
   showScreen("game");
   setStatus("本地对局已开始。");
+  connectLocalSocket();
   updateInfo();
 }
 
@@ -497,14 +580,17 @@ async function enterLocalMode() {
   state.mode = "local";
   await loadLocalState();
   disconnectRoomSocket();
+  disconnectLocalSocket({ suppressReconnect: false });
   clearReturnToSetupTimer();
   showScreen("game");
   setStatus("已进入本地模式。");
+  connectLocalSocket();
   updateInfo();
 }
 
 function enterOnlineSetup() {
   state.mode = "room";
+  disconnectLocalSocket();
   disconnectRoomSocket();
   clearReturnToSetupTimer();
   showScreen("online-setup");
@@ -515,9 +601,10 @@ function enterOnlineSetup() {
 async function createRoom() {
   const name = (els.playerNameInput.value || "").trim() || "房主";
   const turnLimitSeconds = Number.parseInt(els.turnLimitSelect.value, 10) || 30;
+  const competitiveMode = els.onlineCompetitiveMode.value === "on";
   const payload = await api("/api/rooms/create", {
     method: "POST",
-    body: JSON.stringify({ name, turn_limit_seconds: turnLimitSeconds }),
+    body: JSON.stringify({ name, turn_limit_seconds: turnLimitSeconds, competitive_mode: competitiveMode }),
   });
   state.mode = "room";
   state.room = payload.room;
@@ -692,11 +779,12 @@ function updateInfo() {
   renderSetupRoomCard();
 
   if (state.mode === "local" && state.local) {
-    els.modeLabel.textContent = "本地人机";
+    els.localCompetitiveSelect.value = state.local.competitive_mode ? "on" : "off";
+    els.modeLabel.textContent = state.local.competitive_mode ? "本地人机（竞技）" : "本地人机";
     els.turnTimerLabel.textContent = "无";
     els.hintUsageLabel.textContent = "无";
     els.lastMoveLabel.textContent = formatMove(state.local.last_opponent_move);
-    els.linkStateLabel.textContent = "本地";
+    els.linkStateLabel.textContent = localSocketOpen() ? "本地实时同步中" : "本地离线同步";
     els.hintRoomBtn.disabled = true;
     els.hintRoomBtn.textContent = "使用 AI 提示";
     els.acceptUndoBtn.classList.add("hidden");
@@ -716,7 +804,8 @@ function updateInfo() {
   }
 
   if (state.mode === "room" && state.room) {
-    els.modeLabel.textContent = "联机对战";
+    els.onlineCompetitiveMode.value = state.room.competitive_mode ? "on" : "off";
+    els.modeLabel.textContent = state.room.competitive_mode ? "联机对战（竞技）" : "联机对战";
     els.lastMoveLabel.textContent = formatMove(state.room.opponent_last_move);
 
     if (!state.room.match_entered) {
@@ -788,7 +877,12 @@ function updateInfo() {
 async function refresh() {
   try {
     if (state.mode === "local") {
-      await loadLocalState();
+      if (!localSocketOpen()) {
+        await loadLocalState();
+      }
+      if (state.screen === "game") {
+        connectLocalSocket();
+      }
     } else if (state.mode === "room" && state.roomCode && state.screen !== "game") {
       const payload = await api(`/api/rooms/state?code=${encodeURIComponent(state.roomCode)}`, { method: "GET" });
       state.room = payload.room;
@@ -817,6 +911,7 @@ async function goToLanding() {
     await leaveRoom({ silent: true });
   }
   disconnectRoomSocket();
+  disconnectLocalSocket();
   clearReturnToSetupTimer();
   state.mode = "local";
   showScreen("landing");
