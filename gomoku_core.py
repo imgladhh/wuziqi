@@ -210,25 +210,19 @@ def forbidden_reason(board: GameBoard, x: int, y: int, stone: int) -> Optional[s
     if not board.is_inside(x, y) or board.get(x, y) != EMPTY:
         return None
 
-    base_wins = set(board.immediate_winning_points(BLACK))
-    base_straight_fours = set(board.straight_four_points(BLACK))
-
     board.place(x, y, BLACK)
     try:
         if board.has_overline(x, y, BLACK):
             return "overline"
 
-        # Common competitive Renju handling:
-        # A direct five is legal unless the move is an overline.
+        # Renju: direct five is legal for black unless it is overline.
         if board.winner == BLACK:
             return None
 
-        new_wins = set(board.immediate_winning_points(BLACK))
-        if len(new_wins - base_wins) >= 2:
+        if _count_live_four_threats(board, x, y, BLACK) >= 2:
             return "double_four"
 
-        new_straight_fours = set(board.straight_four_points(BLACK))
-        if len(new_straight_fours - base_straight_fours) >= 2:
+        if _count_open_three_directions(board, x, y, BLACK) >= 2:
             return "double_three"
     finally:
         board.remove(x, y)
@@ -237,6 +231,102 @@ def forbidden_reason(board: GameBoard, x: int, y: int, stone: int) -> Optional[s
 
 def is_forbidden_move(board: GameBoard, x: int, y: int, stone: int) -> bool:
     return forbidden_reason(board, x, y, stone) is not None
+
+
+def _line_points(
+    board: GameBoard,
+    x: int,
+    y: int,
+    dx: int,
+    dy: int,
+    radius: int = 5,
+) -> List[Tuple[int, int]]:
+    points: List[Tuple[int, int]] = []
+    for offset in range(-radius, radius + 1):
+        points.append((x + offset * dx, y + offset * dy))
+    return points
+
+
+def _line_chars(
+    board: GameBoard,
+    points: Sequence[Tuple[int, int]],
+    stone: int,
+) -> List[str]:
+    chars: List[str] = []
+    for px, py in points:
+        if not board.is_inside(px, py):
+            chars.append("#")
+            continue
+        cell = board.get(px, py)
+        if cell == EMPTY:
+            chars.append(".")
+        elif cell == stone:
+            chars.append("S")
+        else:
+            chars.append("#")
+    return chars
+
+
+def _live_four_windows_in_direction(
+    board: GameBoard,
+    x: int,
+    y: int,
+    dx: int,
+    dy: int,
+    stone: int,
+) -> List[frozenset[Tuple[int, int]]]:
+    points = _line_points(board, x, y, dx, dy, radius=5)
+    chars = _line_chars(board, points, stone)
+    center_index = len(points) // 2
+    windows: List[frozenset[Tuple[int, int]]] = []
+
+    for start in range(0, len(chars) - 5):
+        if chars[start] != "." or chars[start + 5] != ".":
+            continue
+        segment = chars[start + 1 : start + 5]
+        if any(ch != "S" for ch in segment):
+            continue
+        if not (start + 1 <= center_index <= start + 4):
+            continue
+        stones = frozenset(points[start + 1 : start + 5])
+        windows.append(stones)
+    return windows
+
+
+def _count_live_four_threats(board: GameBoard, x: int, y: int, stone: int) -> int:
+    unique: set[frozenset[Tuple[int, int]]] = set()
+    for dx, dy in DIRECTIONS:
+        for window in _live_four_windows_in_direction(board, x, y, dx, dy, stone):
+            if (x, y) in window:
+                unique.add(window)
+    return len(unique)
+
+
+def _is_open_three_in_direction(board: GameBoard, x: int, y: int, dx: int, dy: int, stone: int) -> bool:
+    # Strict Renju-style open three:
+    # there exists one extension move on this line that creates a live four.
+    points = _line_points(board, x, y, dx, dy, radius=4)
+    for ex, ey in points:
+        if not board.is_inside(ex, ey) or board.get(ex, ey) != EMPTY:
+            continue
+        board.place(ex, ey, stone)
+        try:
+            if board.has_overline(ex, ey, stone):
+                continue
+            windows = _live_four_windows_in_direction(board, x, y, dx, dy, stone)
+            if any((x, y) in window and (ex, ey) in window for window in windows):
+                return True
+        finally:
+            board.remove(ex, ey)
+    return False
+
+
+def _count_open_three_directions(board: GameBoard, x: int, y: int, stone: int) -> int:
+    total = 0
+    for dx, dy in DIRECTIONS:
+        if _is_open_three_in_direction(board, x, y, dx, dy, stone):
+            total += 1
+    return total
 
 
 def opponent(stone: int) -> int:

@@ -936,6 +936,12 @@ els.backToHomeFromSetupBtn.addEventListener("click", () => goToLanding().catch(h
 els.backHomeBtn.addEventListener("click", () => goToLanding().catch(handleApiError));
 els.exitMatchBtn.addEventListener("click", () => exitMatch().catch(handleApiError));
 els.startLocalBtn.addEventListener("click", () => startLocal().catch(handleApiError));
+els.localCompetitiveSelect.addEventListener("change", () => {
+  if (state.mode !== "local") return;
+  startLocal()
+    .then(() => setStatus("已切换本地模式规则并重新开局。"))
+    .catch(handleApiError);
+});
 els.undoLocalBtn.addEventListener("click", () => localUndo().catch(handleApiError));
 els.createRoomBtn.addEventListener("click", () => createRoom().catch(handleApiError));
 els.joinRoomBtn.addEventListener("click", () => joinRoom().catch(handleApiError));

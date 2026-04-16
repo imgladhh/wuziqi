@@ -22,6 +22,23 @@ class CompetitiveRuleTests(unittest.TestCase):
         reason = forbidden_reason(board, 7, 7, BLACK)
         self.assertEqual("double_three", reason)
 
+    def test_double_four_is_forbidden_for_black(self) -> None:
+        board = GameBoard()
+        for x, y in ((5, 7), (6, 7), (8, 7), (7, 5), (7, 6), (7, 8)):
+            self.assertTrue(board.place(x, y, BLACK))
+
+        reason = forbidden_reason(board, 7, 7, BLACK)
+        self.assertEqual("double_four", reason)
+
+    def test_blocked_three_is_not_counted_as_open_three(self) -> None:
+        board = GameBoard()
+        for x, y in ((6, 7), (8, 7), (7, 6)):
+            self.assertTrue(board.place(x, y, BLACK))
+        self.assertTrue(board.place(7, 8, WHITE))
+
+        reason = forbidden_reason(board, 7, 7, BLACK)
+        self.assertIsNone(reason)
+
     def test_white_has_no_forbidden_move(self) -> None:
         board = GameBoard()
         for x, y in ((6, 7), (8, 7), (7, 6), (7, 8)):
