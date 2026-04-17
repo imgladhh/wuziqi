@@ -340,15 +340,22 @@ class GomokuAI:
     FORCE_SCORE = WIN_SCORE // 2
     DEFAULT_TIME_LIMIT_MS = 1200
     MOVE_CANDIDATE_LIMIT = 14
+    QUIESCENCE_MAX_PLY = 5
 
     def __init__(
         self,
         depth: int = 2,
         legal_move_checker: Optional[Callable[[GameBoard, int, int, int], bool]] = None,
         time_limit_ms: Optional[int] = None,
+        use_pvs: bool = True,
+        use_quiescence: bool = True,
+        use_threat_space: bool = True,
     ) -> None:
         self.depth = max(1, depth)
         self.time_limit_ms = time_limit_ms
+        self.use_pvs = use_pvs
+        self.use_quiescence = use_quiescence
+        self.use_threat_space = use_threat_space
         self._legal_move_checker = legal_move_checker
         self._tt: Dict[Tuple[int, int, bool, int, int], int] = {}
         self._move_score_cache: Dict[Tuple[int, int, int, Tuple[Tuple[int, int], ...]], List[Move]] = {}
@@ -444,7 +451,20 @@ class GomokuAI:
             return cached
 
         if depth <= 0 or board.is_game_over:
-            score = self.evaluate_board(board, ai_stone)
+            if board.is_game_over:
+                score = self.evaluate_board(board, ai_stone)
+            elif self.use_quiescence:
+                score = self._quiescence(
+                    board=board,
+                    maximizing=maximizing,
+                    ai_stone=ai_stone,
+                    current_stone=current_stone,
+                    alpha=alpha,
+                    beta=beta,
+                    qply=0,
+                )
+            else:
+                score = self.evaluate_board(board, ai_stone)
             self._tt[cache_key] = score
             return score
 
@@ -464,20 +484,34 @@ class GomokuAI:
             value = -10**18
             best_cut: Optional[Move] = None
             has_legal = False
+            first = True
             for move in moves:
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
                 has_legal = True
                 board.place(move.x, move.y, current_stone)
-                score = self.WIN_SCORE - (self._iterative_depth - depth) if board.winner == current_stone else self._minimax(
-                    board, depth - 1, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1
-                )
+                next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
+                if board.winner == current_stone:
+                    score = self.WIN_SCORE - (self._iterative_depth - depth)
+                elif self.use_pvs and not first:
+                    score = self._minimax(
+                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1
+                    )
+                    if alpha < score < beta:
+                        score = self._minimax(
+                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                        )
+                else:
+                    score = self._minimax(
+                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                    )
                 board.remove(move.x, move.y)
                 if score > value:
                     value = score
                     best_cut = move
                 value = max(value, score)
                 alpha = max(alpha, value)
+                first = False
                 if beta <= alpha:
                     self._record_cutoff(ply, move, current_stone, depth)
                     break
@@ -493,20 +527,34 @@ class GomokuAI:
         value = 10**18
         best_cut: Optional[Move] = None
         has_legal = False
+        first = True
         for move in moves:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
             has_legal = True
             board.place(move.x, move.y, current_stone)
-            score = -self.WIN_SCORE + (self._iterative_depth - depth) if board.winner == current_stone else self._minimax(
-                board, depth - 1, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1
-            )
+            next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
+            if board.winner == current_stone:
+                score = -self.WIN_SCORE + (self._iterative_depth - depth)
+            elif self.use_pvs and not first:
+                score = self._minimax(
+                    board, next_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1
+                )
+                if alpha < score < beta:
+                    score = self._minimax(
+                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                    )
+            else:
+                score = self._minimax(
+                    board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                )
             board.remove(move.x, move.y)
             if score < value:
                 value = score
                 best_cut = move
             value = min(value, score)
             beta = min(beta, value)
+            first = False
             if beta <= alpha:
                 self._record_cutoff(ply, move, current_stone, depth)
                 break
@@ -532,9 +580,10 @@ class GomokuAI:
         return [Move(move.x, move.y, move.score) for move in result]
 
     def _candidate_moves(self, board: GameBoard, stone: int) -> List[Move]:
-        forcing = self._forcing_moves(board, stone)
-        if forcing:
-            return forcing
+        if self.use_threat_space:
+            forcing = self._forcing_moves(board, stone)
+            if forcing:
+                return forcing
 
         moves = board.focused_candidate_moves()
         if len(moves) >= 6:
@@ -640,6 +689,8 @@ class GomokuAI:
         return self._legal_move_checker(board, x, y, stone)
 
     def _forcing_moves(self, board: GameBoard, stone: int) -> List[Move]:
+        if not self.use_threat_space:
+            return []
         enemy = opponent(stone)
         forced: List[Move] = []
         seen: set[Tuple[int, int]] = set()
@@ -656,6 +707,20 @@ class GomokuAI:
                 forced.append(Move(move.x, move.y, self.FORCE_SCORE))
         if forced:
             return forced
+
+        for move in self._find_open_four_points(board, stone, limit=8):
+            if (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                forced.append(move)
+        if forced:
+            return forced[:10]
+
+        for move in self._find_open_four_points(board, enemy, limit=8):
+            if (move.x, move.y) not in seen and self._is_legal_move(board, move.x, move.y, stone):
+                seen.add((move.x, move.y))
+                forced.append(Move(move.x, move.y, self.FORCE_SCORE // 2))
+        if forced:
+            return forced[:10]
 
         for move in self._find_major_threat_points(board, stone, limit=8):
             if (move.x, move.y) not in seen:
@@ -695,6 +760,20 @@ class GomokuAI:
                     break
         return points
 
+    def _find_open_four_points(self, board: GameBoard, stone: int, limit: int = 8) -> List[Move]:
+        points: List[Move] = []
+        for move in board.focused_candidate_moves(distance=3, limit_area=6):
+            if not self._is_legal_move(board, move.x, move.y, stone):
+                continue
+            board.place(move.x, move.y, stone)
+            is_open_four = self._is_open_four_created(board, move.x, move.y, stone)
+            board.remove(move.x, move.y)
+            if is_open_four:
+                points.append(Move(move.x, move.y, self.FORCE_SCORE // 2))
+                if len(points) >= limit:
+                    break
+        return points
+
     def _creates_major_threat(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
         for dx, dy in DIRECTIONS:
             count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
@@ -704,7 +783,16 @@ class GomokuAI:
                 return True
         return False
 
+    def _is_open_four_created(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
+            if count == 4 and open_ends == 2:
+                return True
+        return False
+
     def _threat_space_bonus(self, board: GameBoard, x: int, y: int, stone: int) -> int:
+        if not self.use_threat_space:
+            return 0
         major_dirs = 0
         for dx, dy in DIRECTIONS:
             count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
@@ -878,6 +966,88 @@ class GomokuAI:
     def _check_timeout(self) -> None:
         if self._time_up():
             raise TimeoutError
+
+    def _tactical_extension(self, board: GameBoard, x: int, y: int, stone: int, depth: int, ply: int) -> int:
+        if depth > 2 or ply > 7:
+            return 0
+        if board.winner == stone:
+            return 1
+        if self._is_open_four_created(board, x, y, stone):
+            return 1
+        if self._creates_major_threat(board, x, y, stone):
+            return 1
+        return 0
+
+    def _quiescence(
+        self,
+        board: GameBoard,
+        maximizing: bool,
+        ai_stone: int,
+        current_stone: int,
+        alpha: int,
+        beta: int,
+        qply: int,
+    ) -> int:
+        self._check_timeout()
+        stand_pat = self.evaluate_board(board, ai_stone)
+        if qply >= self.QUIESCENCE_MAX_PLY:
+            return stand_pat
+
+        if maximizing:
+            if stand_pat >= beta:
+                return stand_pat
+            alpha = max(alpha, stand_pat)
+        else:
+            if stand_pat <= alpha:
+                return stand_pat
+            beta = min(beta, stand_pat)
+
+        tactical = self._forcing_moves(board, current_stone)[:8]
+        if not tactical:
+            return stand_pat
+
+        if maximizing:
+            value = stand_pat
+            for move in tactical:
+                if not self._is_legal_move(board, move.x, move.y, current_stone):
+                    continue
+                board.place(move.x, move.y, current_stone)
+                score = self.WIN_SCORE - qply if board.winner == current_stone else self._quiescence(
+                    board=board,
+                    maximizing=False,
+                    ai_stone=ai_stone,
+                    current_stone=opponent(current_stone),
+                    alpha=alpha,
+                    beta=beta,
+                    qply=qply + 1,
+                )
+                board.remove(move.x, move.y)
+                value = max(value, score)
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    break
+            return value
+
+        value = stand_pat
+        for move in tactical:
+            if not self._is_legal_move(board, move.x, move.y, current_stone):
+                continue
+            board.place(move.x, move.y, current_stone)
+            score = -self.WIN_SCORE + qply if board.winner == current_stone else self._quiescence(
+                board=board,
+                maximizing=True,
+                ai_stone=ai_stone,
+                current_stone=opponent(current_stone),
+                alpha=alpha,
+                beta=beta,
+                qply=qply + 1,
+            )
+            board.remove(move.x, move.y)
+            value = min(value, score)
+            beta = min(beta, value)
+            if alpha >= beta:
+                break
+        return value
 
     def _explain_move(self, board: GameBoard, stone: int, move: Move) -> str:
         enemy = opponent(stone)

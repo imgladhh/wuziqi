@@ -1,6 +1,6 @@
 # 五子棋 Web 项目
 
-基于 Python + WebSocket 的五子棋项目，支持本地人机与联机对战，包含竞技规则、聊天、AI 提示等功能。
+基于 Python + WebSocket 的五子棋项目，支持本地人机与联机对战，包含竞技规则、聊天、AI 提示与 Elo 评测。
 
 ## 功能概览
 
@@ -13,35 +13,17 @@
 - AI 提示（每局每人一次）
 - 竞技模式（黑棋禁手：长连 / 四四 / 三三）
 
-## 竞技模式说明
-
-- 本地模式：开始对局前选择是否开启竞技模式
-- 联机模式：房主建房时选择，整局生效
-- 开启后仅黑棋受禁手约束，白棋不受禁手限制
-- AI 落子与 AI 提示会自动规避禁手
-
-禁手规则参考：
-- https://www.renju.net/rules/
-- https://oconvertor.com/blog/gomoku-competitive-forbidden-moves-guide
-
 ## 本地运行
 
-在 `E:\wuziqi` 目录执行：
-
 ```powershell
+cd E:\wuziqi
 python .\web_server.py
 ```
 
-如果你的环境使用 `py`：
+若你的环境使用 `py`：
 
 ```powershell
 py .\web_server.py
-```
-
-安装依赖：
-
-```powershell
-python -m pip install -r .\requirements.txt
 ```
 
 浏览器访问：
@@ -50,68 +32,120 @@ python -m pip install -r .\requirements.txt
 http://127.0.0.1:8000
 ```
 
-前端更新后建议强刷：
-
-```text
-Ctrl + Shift + R
-```
-
 ## 测试
 
 ```powershell
-python -m unittest -q tests.test_gomoku_competitive
-python -m py_compile .\gomoku_core.py .\web_server.py
+python -m unittest -q tests.test_gomoku_competitive tests.test_gomoku_ai_engine
+python -m py_compile .\gomoku_core.py .\web_server.py .\tools\eval_elo.py
 node --check .\web\assets\app.js
 ```
 
-## 联机流程
+## AI 评测（Elo）
 
-1. 输入昵称，选择每手时限（可选竞技模式）
-2. 房主创建房间并复制房间码给对手
-3. 对手输入房间码加入
-4. 仅房主点击“进入对局”后双方进入棋盘
-5. 对局页可聊天、悔棋、重开、退出
-
-## AI 路线图（后续可实现）
-
-当前 AI 仍以 `minimax + alpha-beta` 为核心。后续建议升级：
-
-- 更强走法排序（先搜必赢/必防/强制手）
-- 迭代加深 + 每手时间预算
-- 置换表（Zobrist Hash）
-- 威胁空间优先搜索（活三/活四强制线）
-- 分阶段评估函数（开局/中盘/残局）
-
-### 预期收益（经验值）
-
-- 同等硬件下通常可接近 +1～+2 层“有效深度”
-- 防守稳定性明显提升，漏防冲四概率下降
-- 限时下走子质量更稳定
-- 完整实现并调参后，Elo 常见可提升约 +200～+500（需实测）
-
-### 建议评测方式
-
-- 新旧引擎自博弈 100～500 局
-- 固定开局集对比
-- 输出胜率、平均耗时、Elo 估计增量
-
-## Render 部署
-
-推送代码：
+常规 A/B：
 
 ```powershell
-cd E:\wuziqi
-git add .
-git commit -m "Update gomoku web app"
-git push
+python .\tools\eval_elo.py --games 200 --depth-a 2 --depth-b 3 --time-a 800 --time-b 1200 --output reports\elo_report.md
 ```
 
-Render 部署：
+消融评测（一次跑模块贡献）：
 
-1. 打开 https://render.com/
-2. `New +` -> `Blueprint`
-3. 连接 GitHub 仓库并选择本项目
-4. 使用仓库中的 `render.yaml` 部署
+```powershell
+python .\tools\eval_elo.py --ablation --ablation-mode single --ablation-games 200 --depth-a 2 --depth-b 3 --time-a 800 --time-b 1200 --output reports\ablation_report.md
+```
+
+全组合消融：
+
+```powershell
+python .\tools\eval_elo.py --ablation --ablation-mode all --ablation-games 200 --depth-a 2 --depth-b 3 --time-a 800 --time-b 1200 --output reports\ablation_report.md
+```
+
+## Gomoku Engine Roadmap v3.0（可执行任务清单）
+
+说明：
+- 当前项目是 Python 版本，引擎优化以“相对收益”为主（如 NPS 提升、命中率提升、确定性保障）。
+- ns 级目标可在后续 C++ 内核阶段追求。
+
+### 阶段 1：性能基石 + 防漏杀（Week 1–2）
+
+目标：
+- NPS 达到当前 2x~4x
+- 10~15 手内简单 VCF 不漏
+- 状态可完全回滚（deterministic）
+
+任务清单：
+- [ ] 1. 增量状态系统（StateUpdater）
+  - 维护：`board`、`zobrist`、四方向线状态、pattern cache（可扩展 legality cache）
+  - 接口：`make_move()` / `unmake_move()`
+  - 验收：
+    - 随机 10k 局 `make -> unmake` 后状态一致
+    - 单线程同局面 `best_move` 完全一致
+- [ ] 2. 两层 Pattern Lookup（PatternEvaluator）
+  - L1：局部窗口 -> 模式类型（FIVE / OPEN_FOUR / FOUR / OPEN_THREE / THREE / TWO / NONE）
+  - L2：四方向组合 -> 威胁等级（WIN / MUST_BLOCK / FORCING / NORMAL）
+  - 验收：
+    - 覆盖测试（窗口组合）
+    - 人工 case 分类正确
+- [ ] 3. 简版 VCF（VCFSolver）
+  - 只搜：冲四 / 防冲四
+  - 触发：root、PV、上一手形成强威胁、近叶子
+  - 验收：
+    - 杀棋题集命中率 >= 95%
+    - 不出现调用爆炸和超时
+- [ ] 4. 轻量开局库（OpeningBook）
+  - 先做 6~8 手轻量命中
+  - 验收：开局命中率 >= 80%
+
+### 阶段 2：搜索效率优化（Week 3–4）
+
+目标：
+- 同时限深度 +1~2 ply
+- fail-high / fail-low 明显下降
+
+任务清单：
+- [ ] 5. Aspiration Windows
+  - 用前一迭代分数做窄窗，失败后扩窗重搜
+- [ ] 6. IID（内部迭代加深）
+  - TT miss 且深度较深时，先搜浅层拿 PV move
+- [ ] 7. 候选分层硬规则
+  - 优先级固定：VCF/VCT > 必防 > 强制威胁 > killer > history
+  - 约束：`history` 不能覆盖必防点
+- [ ] 8. Threat Quiescence
+  - 只扩展：五、活四、冲四（活三可选）
+  - 禁止普通静态扩展
+- [ ] 9. Eval Correction（轻量）
+  - 残差修正 `delta_score`
+  - 约束：`|delta| < 主评估 10%` 且不覆盖 FIVE/OPEN_FOUR 规则
+
+### 阶段 3：并行 + 高级战术（Week 5–8）
+
+前置条件：
+- 单线程 deterministic 通过
+- TT 无污染
+- eval 稳定
+
+任务清单：
+- [ ] 10. Lazy SMP（ParallelSearch）
+  - shared TT + 多线程独立搜索
+  - root move 打散 + 轻度深度偏移
+- [ ] 11. VCT 扩展版
+  - 加入活三、双威胁并控制深宽
+- [ ] 12. 禁手增量缓存（ForbiddenChecker）
+  - 目标：合法性检查接近 O(1)
+
+## 全局工程约束（必须遵守）
+
+- 相同输入 -> 相同输出（单线程）
+- `make -> unmake = identity`
+- 威胁优先级高于启发式
+- VCF 仅作为剪枝探测器，不接管主搜索
+
+## 验收与 Benchmark 体系
+
+- 性能：NPS、分支因子、TT 命中率
+- 正确性：状态一致性、Zobrist 正确性
+- 战术：杀棋题/防守题命中率
+- 实战：`eval_elo.py`（A/B + ablation）
 
 ## 环境变量
 
@@ -121,7 +155,13 @@ Render 部署：
 - `ROOM_TURN_LIMIT_SECONDS`
 - `ROOM_HINT_PAUSE_SECONDS`
 
-## 已知说明
+## 部署（Render）
 
-- Render 免费实例可能休眠，首次访问会有冷启动延迟
-- 浏览器缓存旧静态资源时可能出现样式或脚本异常，建议强刷
+```powershell
+cd E:\wuziqi
+git add .
+git commit -m "Update gomoku web app"
+git push
+```
+
+在 Render 选择 `Blueprint` 并读取仓库中的 `render.yaml`。
