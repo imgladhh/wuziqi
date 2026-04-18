@@ -341,6 +341,18 @@ class GomokuAI:
     DEFAULT_TIME_LIMIT_MS = 1200
     MOVE_CANDIDATE_LIMIT = 14
     QUIESCENCE_MAX_PLY = 5
+    ENEMY_THREAT_PENALTY_SCALE = 1.35
+    ENEMY_MAJOR_THREAT_PENALTY = 42_000
+    ENEMY_OPEN_FOUR_PENALTY = 160_000
+    ENEMY_WIN_POINT_PENALTY = 420_000
+    OWN_OPEN_FOUR_BONUS = 85_000
+    OWN_WIN_POINT_BONUS = 170_000
+    TIER_OWN_FIVE = 0
+    TIER_BLOCK_ENEMY_FIVE = 1
+    TIER_BLOCK_ENEMY_OPEN_FOUR = 2
+    TIER_OWN_FOUR_THREAT = 3
+    TIER_OWN_DOUBLE_THREE = 4
+    TIER_NORMAL = 5
 
     def __init__(
         self,
@@ -415,11 +427,15 @@ class GomokuAI:
         limit_ms = self.time_limit_ms if self.time_limit_ms is not None else self.DEFAULT_TIME_LIMIT_MS
         self._deadline = time.perf_counter() + max(0.15, limit_ms / 1000.0)
 
-        if self.use_vcf_probe:
+        forced = self._forced_move(board, ai_stone)
+        if forced is not None:
+            return forced
+
+        if self.use_vcf_probe and self._should_trigger_vcf_probe(board, ai_stone):
             vcf_move = self._vcf_probe_root(board, ai_stone)
             if vcf_move is not None and self._is_legal_move(board, vcf_move.x, vcf_move.y, ai_stone):
                 return vcf_move
-        if self.use_vct_probe:
+        if self.use_vct_probe and self._should_trigger_vct_probe(board, ai_stone):
             vct_move = self._vct_probe_root(board, ai_stone)
             if vct_move is not None and self._is_legal_move(board, vct_move.x, vct_move.y, ai_stone):
                 return vct_move
@@ -428,10 +444,6 @@ class GomokuAI:
             smp_move = self._lazy_smp_root(board, ai_stone)
             if smp_move is not None and self._is_legal_move(board, smp_move.x, smp_move.y, ai_stone):
                 return smp_move
-
-        forced = self._forced_move(board, ai_stone)
-        if forced is not None:
-            return forced
 
         best: Optional[Move] = None
         prev_score = 0
@@ -509,7 +521,7 @@ class GomokuAI:
             from engine_p1 import ThreatResultType, VCFSolver  # local import to avoid circular dependency
         except Exception:
             return None
-        solver = VCFSolver()
+        solver = VCFSolver(max_nodes=1800, max_width_attack=8, max_width_defense=10)
         result = solver.solve(board, attacker=stone, max_depth=self.vcf_probe_depth)
         if result.result != ThreatResultType.WIN or not result.pv:
             return None
@@ -525,7 +537,7 @@ class GomokuAI:
             from engine_p1 import ThreatResultType, VCTSolver
         except Exception:
             return None
-        solver = VCTSolver()
+        solver = VCTSolver(max_nodes=2500, max_width_attack=10, max_width_defense=12)
         result = solver.solve(board, attacker=stone, max_depth=self.vct_probe_depth)
         if result.result != ThreatResultType.WIN or not result.pv:
             return None
@@ -533,6 +545,51 @@ class GomokuAI:
         if board.is_inside(x, y) and board.get(x, y) == EMPTY:
             return Move(x, y, self.FORCE_SCORE // 2)
         return None
+
+    def _should_trigger_vcf_probe(self, board: GameBoard, stone: int) -> bool:
+        if board.move_count < 6 or self._time_up():
+            return False
+        if not board.history:
+            return False
+        if (self._deadline - time.perf_counter()) < 0.08:
+            return False
+        enemy = opponent(stone)
+        # Root gate: only probe when there is near-term tactical tension.
+        if board.immediate_winning_points(stone, limit=1):
+            return True
+        if board.immediate_winning_points(enemy, limit=1):
+            return True
+        if self._find_open_four_points(board, stone, limit=1):
+            return True
+        if self._find_open_four_points(board, enemy, limit=1):
+            return True
+        lx, ly, ls = board.history[-1]
+        return self._move_has_open_three_or_four(board, lx, ly, ls)
+
+    def _should_trigger_vct_probe(self, board: GameBoard, stone: int) -> bool:
+        if board.move_count < 8 or not self._should_trigger_vcf_probe(board, stone):
+            return False
+        if (self._deadline - time.perf_counter()) < 0.12:
+            return False
+        enemy = opponent(stone)
+        # VCT gate: slightly stricter than VCF, require stronger forcing signal.
+        if self._find_open_four_points(board, stone, limit=1):
+            return True
+        if self._find_major_threat_points(board, stone, limit=2):
+            return True
+        lx, ly, ls = board.history[-1]
+        if ls == enemy and self._move_has_open_three_or_four(board, lx, ly, ls):
+            return True
+        return False
+
+    def _move_has_open_three_or_four(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
+            if count >= 4 and open_ends >= 1:
+                return True
+            if count == 3 and open_ends == 2:
+                return True
+        return False
 
     def _lazy_smp_root(self, board: GameBoard, stone: int) -> Optional[Move]:
         try:
@@ -814,26 +871,70 @@ class GomokuAI:
         ranked = [Move(move.x, move.y, move.score) for move in moves]
         enemy = opponent(stone)
         killers = self._killer_moves.get(ply, [])
+        prioritized: List[Tuple[int, int, Move]] = []
         for move in ranked:
             if not self._is_legal_move(board, move.x, move.y, stone):
                 move.score = -10**17
+                prioritized.append((self.TIER_NORMAL + 1, move.score, move))
                 continue
             board.place(move.x, move.y, stone)
+            own_win_now = board.winner == stone
             attack = self.evaluate_position(board, move.x, move.y, stone)
             attack += self._fork_bonus(board, stone)
             attack += self._threat_space_bonus(board, move.x, move.y, stone)
+            own_four_threat = self._creates_four_threat(board, move.x, move.y, stone)
+            own_double_three = _count_open_three_directions(board, move.x, move.y, stone) >= 2
             board.remove(move.x, move.y)
 
             board.place(move.x, move.y, enemy)
+            enemy_win_now = board.winner == enemy
             defend = self.evaluate_position(board, move.x, move.y, enemy)
             defend += self._fork_bonus(board, enemy)
+            blocks_enemy_open_four = self._is_open_four_created(board, move.x, move.y, enemy)
             board.remove(move.x, move.y)
 
             history_score = self._history_table.get((stone, move.x, move.y), 0) // 3
             killer_score = 90_000 if (move.x, move.y) in killers else 0
-            move.score = attack + defend // 2 + history_score + killer_score
-        ranked.sort(key=lambda item: item.score, reverse=True)
-        return ranked
+            heuristic_score = attack + defend // 2 + history_score + killer_score
+            move.score = heuristic_score
+            tier = self._move_priority_tier(
+                own_win_now=own_win_now,
+                enemy_win_now=enemy_win_now,
+                blocks_enemy_open_four=blocks_enemy_open_four,
+                own_four_threat=own_four_threat,
+                own_double_three=own_double_three,
+            )
+            prioritized.append((tier, -heuristic_score, move))
+
+        prioritized.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in prioritized]
+
+    def _move_priority_tier(
+        self,
+        own_win_now: bool,
+        enemy_win_now: bool,
+        blocks_enemy_open_four: bool,
+        own_four_threat: bool,
+        own_double_three: bool,
+    ) -> int:
+        if own_win_now:
+            return self.TIER_OWN_FIVE
+        if enemy_win_now:
+            return self.TIER_BLOCK_ENEMY_FIVE
+        if blocks_enemy_open_four:
+            return self.TIER_BLOCK_ENEMY_OPEN_FOUR
+        if own_four_threat:
+            return self.TIER_OWN_FOUR_THREAT
+        if own_double_three:
+            return self.TIER_OWN_DOUBLE_THREE
+        return self.TIER_NORMAL
+
+    def _creates_four_threat(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
+            if count >= 4 and open_ends >= 1:
+                return True
+        return False
 
     def _find_winning_move(self, board: GameBoard, stone: int) -> Optional[Move]:
         for move in self._urgent_moves(board, stone):
@@ -1073,10 +1174,34 @@ class GomokuAI:
                     continue
                 value = self.evaluate_position(board, x, y, stone, phase)
                 score += value if stone == ai_stone else -value
-        score += self._threat_score(board, ai_stone, phase) - self._threat_score(board, enemy, phase)
+        own_threat = self._threat_score(board, ai_stone, phase)
+        enemy_threat = self._threat_score(board, enemy, phase)
+        score += own_threat - int(enemy_threat * self.ENEMY_THREAT_PENALTY_SCALE)
+        score += self._defense_urgency_adjustment(board, ai_stone)
         if self.use_eval_correction and abs(score) < self.WIN_SCORE // 4:
             score += self._eval_residual(board, ai_stone, base_score=score)
         return score
+
+    def _defense_urgency_adjustment(self, board: GameBoard, ai_stone: int) -> int:
+        enemy = opponent(ai_stone)
+        own_win_points = len(board.immediate_winning_points(ai_stone, limit=3))
+        enemy_win_points = len(board.immediate_winning_points(enemy, limit=3))
+        own_open_four = len(self._find_open_four_points(board, ai_stone, limit=3))
+        enemy_open_four = len(self._find_open_four_points(board, enemy, limit=3))
+        own_major = len(self._find_major_threat_points(board, ai_stone, limit=4))
+        enemy_major = len(self._find_major_threat_points(board, enemy, limit=4))
+
+        swing = 0
+        swing += own_win_points * self.OWN_WIN_POINT_BONUS
+        swing -= enemy_win_points * self.ENEMY_WIN_POINT_PENALTY
+        swing += own_open_four * self.OWN_OPEN_FOUR_BONUS
+        swing -= enemy_open_four * self.ENEMY_OPEN_FOUR_PENALTY
+        swing += (own_major - enemy_major) * self.ENEMY_MAJOR_THREAT_PENALTY
+
+        # If opponent has direct win points and we don't, force a clear defensive bias.
+        if enemy_win_points > 0 and own_win_points == 0:
+            swing -= 220_000
+        return swing
 
     def _eval_residual(self, board: GameBoard, ai_stone: int, base_score: int) -> int:
         enemy = opponent(ai_stone)

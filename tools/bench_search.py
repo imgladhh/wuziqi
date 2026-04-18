@@ -217,6 +217,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-ms", type=int, default=800)
     parser.add_argument("--repeat", type=int, default=3, help="Repeat searches per position.")
     parser.add_argument("--disable-forced", action="store_true", help="Disable forced-move shortcut for profiling tree stats.")
+    parser.add_argument("--disable-opening-book", action="store_true", help="Disable opening-book shortcut in benchmark runs.")
+    parser.add_argument("--disable-vcf-vct", action="store_true", help="Disable VCF/VCT root probes in benchmark runs.")
     parser.add_argument("--output", type=str, default="", help="Optional JSON output path.")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar output.")
     return parser.parse_args()
@@ -235,6 +237,10 @@ def main() -> None:
         use_pvs=True,
         use_quiescence=True,
         use_threat_space=True,
+        use_opening_book=not bool(args.disable_opening_book),
+        use_vcf_probe=not bool(args.disable_vcf_vct),
+        use_vct_probe=not bool(args.disable_vcf_vct),
+        use_lazy_smp=False,
         disable_forced=bool(args.disable_forced),
     )
     show_progress = not args.no_progress
