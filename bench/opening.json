@@ -1,0 +1,44 @@
+{
+  "description": "Opening skeleton positions for quality and opening-book hit checks.",
+  "positions": [
+    {
+      "id": "opening_1",
+      "size": 15,
+      "side_to_move": 1,
+      "tags": ["opening"],
+      "moves": [
+        [7, 7, 1],
+        [7, 8, 2],
+        [8, 7, 1],
+        [6, 7, 2]
+      ]
+    },
+    {
+      "id": "opening_2",
+      "size": 15,
+      "side_to_move": 2,
+      "tags": ["opening"],
+      "moves": [
+        [7, 7, 1],
+        [8, 8, 2],
+        [6, 6, 1],
+        [8, 6, 2],
+        [6, 8, 1]
+      ]
+    },
+    {
+      "id": "opening_3",
+      "size": 15,
+      "side_to_move": 1,
+      "tags": ["opening"],
+      "moves": [
+        [7, 7, 1],
+        [7, 6, 2],
+        [8, 7, 1],
+        [6, 8, 2],
+        [8, 6, 1],
+        [6, 7, 2]
+      ]
+    }
+  ]
+}

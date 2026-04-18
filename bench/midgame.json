@@ -1,0 +1,37 @@
+{
+  "description": "Balanced midgame positions for micro/search benchmark.",
+  "positions": [
+    {
+      "id": "midgame_1",
+      "size": 15,
+      "side_to_move": 1,
+      "tags": ["midgame", "balanced"],
+      "moves": [
+        [7, 7, 1], [8, 7, 2], [6, 7, 1], [7, 8, 2], [7, 6, 1],
+        [8, 8, 2], [6, 6, 1], [9, 7, 2], [5, 7, 1], [8, 6, 2]
+      ]
+    },
+    {
+      "id": "midgame_2",
+      "size": 15,
+      "side_to_move": 2,
+      "tags": ["midgame", "tactical"],
+      "moves": [
+        [7, 7, 1], [7, 8, 2], [8, 7, 1], [8, 8, 2], [6, 7, 1],
+        [6, 8, 2], [9, 7, 1], [5, 8, 2], [7, 6, 1], [9, 8, 2],
+        [6, 6, 1], [5, 7, 2]
+      ]
+    },
+    {
+      "id": "midgame_3",
+      "size": 15,
+      "side_to_move": 1,
+      "tags": ["midgame", "rules_sensitive"],
+      "moves": [
+        [7, 7, 1], [7, 8, 2], [8, 7, 1], [8, 8, 2], [6, 7, 1],
+        [6, 8, 2], [7, 6, 1], [8, 6, 2], [5, 7, 1], [9, 7, 2],
+        [5, 8, 1], [9, 8, 2], [6, 9, 1], [7, 9, 2]
+      ]
+    }
+  ]
+}

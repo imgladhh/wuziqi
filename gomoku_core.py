@@ -350,12 +350,46 @@ class GomokuAI:
         use_pvs: bool = True,
         use_quiescence: bool = True,
         use_threat_space: bool = True,
+        opening_move_provider: Optional[Callable[[GameBoard, int], Optional[Move]]] = None,
+        use_opening_book: bool = True,
+        use_vcf_probe: bool = True,
+        vcf_probe_depth: int = 6,
+        use_vct_probe: bool = True,
+        vct_probe_depth: int = 8,
+        use_pattern_lookup: bool = True,
+        use_aspiration: bool = True,
+        aspiration_delta: int = 120,
+        use_iid: bool = True,
+        iid_min_depth: int = 5,
+        use_eval_correction: bool = True,
+        eval_correction_limit: float = 0.10,
+        use_threat_qsearch: bool = True,
+        use_lazy_smp: bool = True,
+        smp_threads: int = 2,
+        smp_depth_offset: int = 1,
     ) -> None:
         self.depth = max(1, depth)
         self.time_limit_ms = time_limit_ms
         self.use_pvs = use_pvs
         self.use_quiescence = use_quiescence
         self.use_threat_space = use_threat_space
+        self.use_opening_book = use_opening_book
+        self.use_vcf_probe = use_vcf_probe
+        self.vcf_probe_depth = max(2, vcf_probe_depth)
+        self.use_vct_probe = use_vct_probe
+        self.vct_probe_depth = max(3, vct_probe_depth)
+        self.use_pattern_lookup = use_pattern_lookup
+        self.use_aspiration = use_aspiration
+        self.aspiration_delta = max(40, aspiration_delta)
+        self.use_iid = use_iid
+        self.iid_min_depth = max(3, iid_min_depth)
+        self.use_eval_correction = use_eval_correction
+        self.eval_correction_limit = max(0.01, min(0.50, eval_correction_limit))
+        self.use_threat_qsearch = use_threat_qsearch
+        self.use_lazy_smp = use_lazy_smp
+        self.smp_threads = max(2, smp_threads)
+        self.smp_depth_offset = max(0, smp_depth_offset)
+        self.opening_move_provider = opening_move_provider
         self._legal_move_checker = legal_move_checker
         self._tt: Dict[Tuple[int, int, bool, int, int], int] = {}
         self._move_score_cache: Dict[Tuple[int, int, int, Tuple[Tuple[int, int], ...]], List[Move]] = {}
@@ -365,24 +399,74 @@ class GomokuAI:
         self._zobrist_size = 0
         self._deadline = 0.0
         self._iterative_depth = self.depth
+        self._default_opening_provider: Optional[Callable[[GameBoard, int], Optional[Move]]] = None
 
     def best_move(self, board: GameBoard, ai_stone: int) -> Move:
         self._tt.clear()
         self._move_score_cache.clear()
         self._killer_moves.clear()
         self._ensure_zobrist(board.size)
+        opening_provider = self._resolve_opening_provider()
+        if opening_provider is not None and board.move_count <= 8 and self.use_opening_book:
+            opening = opening_provider(board, ai_stone)
+            if opening is not None and self._is_legal_move(board, opening.x, opening.y, ai_stone):
+                if board.is_inside(opening.x, opening.y) and board.get(opening.x, opening.y) == EMPTY:
+                    return Move(opening.x, opening.y)
         limit_ms = self.time_limit_ms if self.time_limit_ms is not None else self.DEFAULT_TIME_LIMIT_MS
         self._deadline = time.perf_counter() + max(0.15, limit_ms / 1000.0)
+
+        if self.use_vcf_probe:
+            vcf_move = self._vcf_probe_root(board, ai_stone)
+            if vcf_move is not None and self._is_legal_move(board, vcf_move.x, vcf_move.y, ai_stone):
+                return vcf_move
+        if self.use_vct_probe:
+            vct_move = self._vct_probe_root(board, ai_stone)
+            if vct_move is not None and self._is_legal_move(board, vct_move.x, vct_move.y, ai_stone):
+                return vct_move
+
+        if self.use_lazy_smp and self.smp_threads > 1 and board.move_count >= 6:
+            smp_move = self._lazy_smp_root(board, ai_stone)
+            if smp_move is not None and self._is_legal_move(board, smp_move.x, smp_move.y, ai_stone):
+                return smp_move
 
         forced = self._forced_move(board, ai_stone)
         if forced is not None:
             return forced
 
         best: Optional[Move] = None
+        prev_score = 0
         for depth in range(1, self.depth + 1):
             self._iterative_depth = depth
             try:
-                candidate = self._search_root(board, ai_stone, depth)
+                if self.use_aspiration and depth >= 2:
+                    delta = self.aspiration_delta
+                    candidate: Optional[Move] = None
+                    while True:
+                        low = prev_score - delta
+                        high = prev_score + delta
+                        candidate, score = self._search_root(board, ai_stone, depth, alpha=low, beta=high)
+                        if candidate is None:
+                            break
+                        if score <= low:
+                            delta *= 2
+                            if delta > self.WIN_SCORE:
+                                break
+                            continue
+                        if score >= high:
+                            delta *= 2
+                            if delta > self.WIN_SCORE:
+                                break
+                            continue
+                        prev_score = score
+                        break
+                    if candidate is None:
+                        candidate, score = self._search_root(board, ai_stone, depth)
+                        if candidate is not None:
+                            prev_score = score
+                else:
+                    candidate, score = self._search_root(board, ai_stone, depth)
+                    if candidate is not None:
+                        prev_score = score
             except TimeoutError:
                 break
             if candidate is not None:
@@ -402,9 +486,98 @@ class GomokuAI:
         reason = self._explain_move(board, ai_stone, move)
         return move, reason
 
-    def _search_root(self, board: GameBoard, ai_stone: int, depth: int) -> Optional[Move]:
-        alpha = -10**18
-        beta = 10**18
+    def _resolve_opening_provider(self) -> Optional[Callable[[GameBoard, int], Optional[Move]]]:
+        if self.opening_move_provider is not None:
+            return self.opening_move_provider
+        if not self.use_opening_book:
+            return None
+        if self._default_opening_provider is not None:
+            return self._default_opening_provider
+        try:
+            from engine_p1 import OpeningBook  # local import to avoid circular dependency at module load
+
+            book = OpeningBook()
+            self._default_opening_provider = book.query
+        except Exception:
+            self._default_opening_provider = None
+        return self._default_opening_provider
+
+    def _vcf_probe_root(self, board: GameBoard, stone: int) -> Optional[Move]:
+        if board.move_count < 6:
+            return None
+        try:
+            from engine_p1 import ThreatResultType, VCFSolver  # local import to avoid circular dependency
+        except Exception:
+            return None
+        solver = VCFSolver()
+        result = solver.solve(board, attacker=stone, max_depth=self.vcf_probe_depth)
+        if result.result != ThreatResultType.WIN or not result.pv:
+            return None
+        x, y = result.pv[0]
+        if board.is_inside(x, y) and board.get(x, y) == EMPTY:
+            return Move(x, y, self.FORCE_SCORE)
+        return None
+
+    def _vct_probe_root(self, board: GameBoard, stone: int) -> Optional[Move]:
+        if board.move_count < 8:
+            return None
+        try:
+            from engine_p1 import ThreatResultType, VCTSolver
+        except Exception:
+            return None
+        solver = VCTSolver()
+        result = solver.solve(board, attacker=stone, max_depth=self.vct_probe_depth)
+        if result.result != ThreatResultType.WIN or not result.pv:
+            return None
+        x, y = result.pv[0]
+        if board.is_inside(x, y) and board.get(x, y) == EMPTY:
+            return Move(x, y, self.FORCE_SCORE // 2)
+        return None
+
+    def _lazy_smp_root(self, board: GameBoard, stone: int) -> Optional[Move]:
+        try:
+            from engine_p1 import ParallelSearch
+        except Exception:
+            return None
+        parallel = ParallelSearch(threads=self.smp_threads, depth_offset=self.smp_depth_offset)
+
+        def builder(depth_shift: int) -> "GomokuAI":
+            # Root workers are intentionally shallowly diversified.
+            worker_depth = max(1, self.depth - depth_shift)
+            return GomokuAI(
+                depth=worker_depth,
+                legal_move_checker=self._legal_move_checker,
+                time_limit_ms=min(120, self.time_limit_ms or self.DEFAULT_TIME_LIMIT_MS),
+                use_pvs=self.use_pvs,
+                use_quiescence=self.use_quiescence,
+                use_threat_space=self.use_threat_space,
+                opening_move_provider=None,
+                use_opening_book=False,
+                use_vcf_probe=False,
+                vcf_probe_depth=self.vcf_probe_depth,
+                use_vct_probe=False,
+                vct_probe_depth=self.vct_probe_depth,
+                use_pattern_lookup=self.use_pattern_lookup,
+                use_aspiration=False,
+                aspiration_delta=self.aspiration_delta,
+                use_iid=self.use_iid,
+                iid_min_depth=self.iid_min_depth,
+                use_eval_correction=self.use_eval_correction,
+                eval_correction_limit=self.eval_correction_limit,
+                use_threat_qsearch=self.use_threat_qsearch,
+                use_lazy_smp=False,
+            )
+
+        return parallel.best_move(board, stone, ai_builder=builder)
+
+    def _search_root(
+        self,
+        board: GameBoard,
+        ai_stone: int,
+        depth: int,
+        alpha: int = -10**18,
+        beta: int = 10**18,
+    ) -> Tuple[Optional[Move], int]:
         best: Optional[Move] = None
         best_score = -10**18
 
@@ -430,7 +603,7 @@ class GomokuAI:
                 best = Move(move.x, move.y, score)
             if score > alpha:
                 alpha = score
-        return best
+        return best, best_score
 
     def _minimax(
         self,
@@ -475,6 +648,10 @@ class GomokuAI:
             return score
 
         moves = self._sorted_moves(board, self._candidate_moves(board, current_stone), current_stone, ply=ply)
+        if self.use_iid and depth >= self.iid_min_depth and len(moves) > 1:
+            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply)
+            if hint is not None:
+                moves = self._prioritize_hint(moves, hint)
         if not moves:
             score = self.evaluate_board(board, ai_stone)
             self._tt[cache_key] = score
@@ -580,10 +757,15 @@ class GomokuAI:
         return [Move(move.x, move.y, move.score) for move in result]
 
     def _candidate_moves(self, board: GameBoard, stone: int) -> List[Move]:
+        # Hard priority rule: defense points must always outrank heuristic history/killer.
+        must_block = self._must_block_moves(board, stone)
+        if must_block:
+            return must_block[: self.MOVE_CANDIDATE_LIMIT]
+
         if self.use_threat_space:
             forcing = self._forcing_moves(board, stone)
             if forcing:
-                return forcing
+                return forcing[: self.MOVE_CANDIDATE_LIMIT]
 
         moves = board.focused_candidate_moves()
         if len(moves) >= 6:
@@ -687,6 +869,69 @@ class GomokuAI:
         if self._legal_move_checker is None:
             return True
         return self._legal_move_checker(board, x, y, stone)
+
+    def _must_block_moves(self, board: GameBoard, stone: int) -> List[Move]:
+        enemy = opponent(stone)
+        seen: set[Tuple[int, int]] = set()
+        out: List[Move] = []
+        for x, y in board.immediate_winning_points(enemy, limit=12):
+            if self._is_legal_move(board, x, y, stone) and (x, y) not in seen:
+                seen.add((x, y))
+                out.append(Move(x, y, self.FORCE_SCORE))
+        if out:
+            return out
+        for move in self._find_open_four_points(board, enemy, limit=10):
+            if self._is_legal_move(board, move.x, move.y, stone) and (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                out.append(Move(move.x, move.y, self.FORCE_SCORE // 2))
+        return out
+
+    def _iid_probe_move(
+        self,
+        board: GameBoard,
+        current_stone: int,
+        ai_stone: int,
+        depth: int,
+        ply: int,
+    ) -> Optional[Tuple[int, int]]:
+        shallow_depth = max(1, depth - 2)
+        probe_moves = self._sorted_moves(board, board.focused_candidate_moves(), current_stone, ply=ply)
+        if not probe_moves:
+            return None
+        best: Optional[Tuple[int, int]] = None
+        best_score = -10**18
+        for move in probe_moves[:8]:
+            if not self._is_legal_move(board, move.x, move.y, current_stone):
+                continue
+            board.place(move.x, move.y, current_stone)
+            score = self.WIN_SCORE if board.winner == current_stone else self._minimax(
+                board,
+                shallow_depth - 1,
+                maximizing=(opponent(current_stone) == ai_stone),
+                ai_stone=ai_stone,
+                current_stone=opponent(current_stone),
+                alpha=-10**18,
+                beta=10**18,
+                ply=ply + 1,
+            )
+            board.remove(move.x, move.y)
+            if score > best_score:
+                best_score = score
+                best = (move.x, move.y)
+        return best
+
+    def _prioritize_hint(self, moves: List[Move], hint: Tuple[int, int]) -> List[Move]:
+        if not moves:
+            return moves
+        hx, hy = hint
+        prioritized: List[Move] = []
+        rest: List[Move] = []
+        for move in moves:
+            if move.x == hx and move.y == hy:
+                prioritized.append(move)
+            else:
+                rest.append(move)
+        return prioritized + rest
 
     def _forcing_moves(self, board: GameBoard, stone: int) -> List[Move]:
         if not self.use_threat_space:
@@ -793,6 +1038,20 @@ class GomokuAI:
     def _threat_space_bonus(self, board: GameBoard, x: int, y: int, stone: int) -> int:
         if not self.use_threat_space:
             return 0
+        if self.use_pattern_lookup:
+            try:
+                from engine_p1 import PatternEvaluator, ThreatLevel  # local import
+
+                patterns = PatternEvaluator.classify_directions(board, x, y, stone)
+                level = PatternEvaluator.classify_threat(patterns)
+                if level == ThreatLevel.WIN:
+                    return 260_000
+                if level == ThreatLevel.MUST_BLOCK:
+                    return 170_000
+                if level == ThreatLevel.FORCING:
+                    return 80_000
+            except Exception:
+                pass
         major_dirs = 0
         for dx, dy in DIRECTIONS:
             count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
@@ -815,7 +1074,29 @@ class GomokuAI:
                 value = self.evaluate_position(board, x, y, stone, phase)
                 score += value if stone == ai_stone else -value
         score += self._threat_score(board, ai_stone, phase) - self._threat_score(board, enemy, phase)
+        if self.use_eval_correction and abs(score) < self.WIN_SCORE // 4:
+            score += self._eval_residual(board, ai_stone, base_score=score)
         return score
+
+    def _eval_residual(self, board: GameBoard, ai_stone: int, base_score: int) -> int:
+        enemy = opponent(ai_stone)
+        ai_wins = len(board.immediate_winning_points(ai_stone, limit=3))
+        enemy_wins = len(board.immediate_winning_points(enemy, limit=3))
+        ai_open4 = len(self._find_open_four_points(board, ai_stone, limit=4))
+        enemy_open4 = len(self._find_open_four_points(board, enemy, limit=4))
+        ai_major = len(self._find_major_threat_points(board, ai_stone, limit=4))
+        enemy_major = len(self._find_major_threat_points(board, enemy, limit=4))
+        feature_score = (
+            (ai_wins - enemy_wins) * 260_000
+            + (ai_open4 - enemy_open4) * 120_000
+            + (ai_major - enemy_major) * 40_000
+        )
+        limit = int(max(1, abs(base_score) * self.eval_correction_limit))
+        if feature_score > limit:
+            return limit
+        if feature_score < -limit:
+            return -limit
+        return feature_score
 
     def _threat_score(self, board: GameBoard, stone: int, phase: str) -> int:
         threat = 0
@@ -1002,7 +1283,9 @@ class GomokuAI:
                 return stand_pat
             beta = min(beta, stand_pat)
 
-        tactical = self._forcing_moves(board, current_stone)[:8]
+        tactical = self._threat_qsearch_moves(board, current_stone) if self.use_threat_qsearch else self._forcing_moves(
+            board, current_stone
+        )[:8]
         if not tactical:
             return stand_pat
 
@@ -1048,6 +1331,28 @@ class GomokuAI:
             if alpha >= beta:
                 break
         return value
+
+    def _threat_qsearch_moves(self, board: GameBoard, stone: int) -> List[Move]:
+        seen: set[Tuple[int, int]] = set()
+        out: List[Move] = []
+        for move in self._find_winning_points(board, stone, limit=4):
+            if (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                out.append(move)
+        for move in self._find_open_four_points(board, stone, limit=4):
+            if (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                out.append(move)
+        for move in self._find_major_threat_points(board, stone, limit=4):
+            if (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                out.append(move)
+        enemy = opponent(stone)
+        for x, y in board.immediate_winning_points(enemy, limit=4):
+            if (x, y) not in seen and self._is_legal_move(board, x, y, stone):
+                seen.add((x, y))
+                out.append(Move(x, y, self.FORCE_SCORE))
+        return out[:8]
 
     def _explain_move(self, board: GameBoard, stone: int, move: Move) -> str:
         enemy = opponent(stone)
