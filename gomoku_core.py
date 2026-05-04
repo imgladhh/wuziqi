@@ -783,10 +783,17 @@ class GomokuAI:
                 if board.winner == current_stone:
                     score = self.WIN_SCORE - (self._iterative_depth - depth)
                 elif self.use_pvs and not first:
-                    score = self._minimax(
-                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1, child_hash
+                    reduced = (
+                        depth >= self.LMR_MIN_DEPTH
+                        and index >= self.LMR_MIN_INDEX
+                        and next_depth >= 2
+                        and not self._is_forcing_move(board, move.x, move.y, current_stone)
                     )
-                    if alpha < score < beta:
+                    lmr_depth = next_depth - 1 if reduced else next_depth
+                    score = self._minimax(
+                        board, lmr_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1, child_hash
+                    )
+                    if alpha < score < beta or (reduced and score > alpha):
                         score = self._minimax(
                             board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
                         )
@@ -864,10 +871,17 @@ class GomokuAI:
             if board.winner == current_stone:
                 score = -self.WIN_SCORE + (self._iterative_depth - depth)
             elif self.use_pvs and not first:
-                score = self._minimax(
-                    board, next_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1, child_hash
+                reduced = (
+                    depth >= self.LMR_MIN_DEPTH
+                    and index >= self.LMR_MIN_INDEX
+                    and next_depth >= 2
+                    and not self._is_forcing_move(board, move.x, move.y, current_stone)
                 )
-                if alpha < score < beta:
+                lmr_depth = next_depth - 1 if reduced else next_depth
+                score = self._minimax(
+                    board, lmr_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1, child_hash
+                )
+                if alpha < score < beta or (reduced and score < beta):
                     score = self._minimax(
                         board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
                     )
