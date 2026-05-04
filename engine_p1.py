@@ -240,9 +240,11 @@ class VCFSolver:
         self.max_nodes = max(200, max_nodes)
         self.max_width_attack = max(2, max_width_attack)
         self.max_width_defense = max(2, max_width_defense)
+        self._tt: Dict[Tuple[Tuple[Tuple[int, ...], ...], int, int], ThreatResultType] = {}
 
     def solve(self, position: GameBoard, attacker: int, max_depth: int = 6) -> ThreatResult:
         self.nodes = 0
+        self._tt.clear()
         outcome, pv = self._dfs(position, attacker, attacker, max_depth, [])
         return ThreatResult(result=outcome, pv=pv, nodes=self.nodes)
 
@@ -257,27 +259,38 @@ class VCFSolver:
         self.nodes += 1
         if self.nodes > self.max_nodes:
             return ThreatResultType.UNKNOWN, pv
+        tt_key = (board.state_key(), current, depth)
+        cached = self._tt.get(tt_key)
+        if cached is not None:
+            return cached, pv
         if depth <= 0:
+            self._tt[tt_key] = ThreatResultType.UNKNOWN
             return ThreatResultType.UNKNOWN, pv
         if board.winner == attacker:
+            self._tt[tt_key] = ThreatResultType.WIN
             return ThreatResultType.WIN, pv
         if board.winner == opponent(attacker):
+            self._tt[tt_key] = ThreatResultType.LOSS
             return ThreatResultType.LOSS, pv
 
         if current == attacker:
             threats = self._attacker_threat_moves(board, attacker)
             if not threats:
+                self._tt[tt_key] = ThreatResultType.UNKNOWN
                 return ThreatResultType.UNKNOWN, pv
             for x, y in threats:
                 board.place(x, y, attacker)
                 result, child_pv = self._dfs(board, attacker, opponent(attacker), depth - 1, pv + [(x, y)])
                 board.remove(x, y)
                 if result == ThreatResultType.WIN:
+                    self._tt[tt_key] = ThreatResultType.WIN
                     return result, child_pv
+            self._tt[tt_key] = ThreatResultType.UNKNOWN
             return ThreatResultType.UNKNOWN, pv
 
         defenses = self._defender_responses(board, attacker)
         if not defenses:
+            self._tt[tt_key] = ThreatResultType.WIN
             return ThreatResultType.WIN, pv
         for x, y in defenses:
             stone = opponent(attacker)
@@ -285,7 +298,10 @@ class VCFSolver:
             result, child_pv = self._dfs(board, attacker, attacker, depth - 1, pv + [(x, y)])
             board.remove(x, y)
             if result != ThreatResultType.WIN:
-                return ThreatResultType.LOSS if result == ThreatResultType.LOSS else ThreatResultType.UNKNOWN, child_pv
+                final = ThreatResultType.LOSS if result == ThreatResultType.LOSS else ThreatResultType.UNKNOWN
+                self._tt[tt_key] = final
+                return final, child_pv
+        self._tt[tt_key] = ThreatResultType.WIN
         return ThreatResultType.WIN, pv
 
     def _attacker_threat_moves(self, board: GameBoard, stone: int) -> List[Tuple[int, int]]:

@@ -20,6 +20,13 @@ class Move:
     score: int = 0
 
 
+@dataclass
+class TTEntry:
+    score: int
+    flag: int
+    depth: int
+
+
 class GameBoard:
     def __init__(self, size: int = 15) -> None:
         self.size = size
@@ -336,11 +343,16 @@ def opponent(stone: int) -> int:
 
 
 class GomokuAI:
+    TT_EXACT = 0
+    TT_LOWER = 1
+    TT_UPPER = 2
     WIN_SCORE = 10_000_000
     FORCE_SCORE = WIN_SCORE // 2
     DEFAULT_TIME_LIMIT_MS = 1200
     MOVE_CANDIDATE_LIMIT = 14
     QUIESCENCE_MAX_PLY = 5
+    LMR_MIN_DEPTH = 3
+    LMR_MIN_INDEX = 4
     ENEMY_THREAT_PENALTY_SCALE = 1.35
     ENEMY_MAJOR_THREAT_PENALTY = 42_000
     ENEMY_OPEN_FOUR_PENALTY = 160_000
@@ -356,7 +368,7 @@ class GomokuAI:
 
     def __init__(
         self,
-        depth: int = 2,
+        depth: int = 3,
         legal_move_checker: Optional[Callable[[GameBoard, int, int, int], bool]] = None,
         time_limit_ms: Optional[int] = None,
         use_pvs: bool = True,
@@ -379,6 +391,14 @@ class GomokuAI:
         use_lazy_smp: bool = True,
         smp_threads: int = 2,
         smp_depth_offset: int = 1,
+        use_defense_urgency: bool = True,
+        enemy_threat_penalty_scale: float = ENEMY_THREAT_PENALTY_SCALE,
+        vcf_max_nodes: int = 1800,
+        vcf_max_width_attack: int = 8,
+        vcf_max_width_defense: int = 10,
+        vct_max_nodes: int = 2500,
+        vct_max_width_attack: int = 10,
+        vct_max_width_defense: int = 12,
     ) -> None:
         self.depth = max(1, depth)
         self.time_limit_ms = time_limit_ms
@@ -401,9 +421,17 @@ class GomokuAI:
         self.use_lazy_smp = use_lazy_smp
         self.smp_threads = max(2, smp_threads)
         self.smp_depth_offset = max(0, smp_depth_offset)
+        self.use_defense_urgency = use_defense_urgency
+        self.enemy_threat_penalty_scale = max(0.5, min(2.5, enemy_threat_penalty_scale))
+        self.vcf_max_nodes = max(300, vcf_max_nodes)
+        self.vcf_max_width_attack = max(2, vcf_max_width_attack)
+        self.vcf_max_width_defense = max(2, vcf_max_width_defense)
+        self.vct_max_nodes = max(400, vct_max_nodes)
+        self.vct_max_width_attack = max(2, vct_max_width_attack)
+        self.vct_max_width_defense = max(2, vct_max_width_defense)
         self.opening_move_provider = opening_move_provider
         self._legal_move_checker = legal_move_checker
-        self._tt: Dict[Tuple[int, int, bool, int, int], int] = {}
+        self._tt: Dict[Tuple[int, bool, int, int], TTEntry] = {}
         self._move_score_cache: Dict[Tuple[int, int, int, Tuple[Tuple[int, int], ...]], List[Move]] = {}
         self._history_table: Dict[Tuple[int, int, int], int] = {}
         self._killer_moves: Dict[int, List[Tuple[int, int]]] = {}
@@ -521,7 +549,11 @@ class GomokuAI:
             from engine_p1 import ThreatResultType, VCFSolver  # local import to avoid circular dependency
         except Exception:
             return None
-        solver = VCFSolver(max_nodes=1800, max_width_attack=8, max_width_defense=10)
+        solver = VCFSolver(
+            max_nodes=self.vcf_max_nodes,
+            max_width_attack=self.vcf_max_width_attack,
+            max_width_defense=self.vcf_max_width_defense,
+        )
         result = solver.solve(board, attacker=stone, max_depth=self.vcf_probe_depth)
         if result.result != ThreatResultType.WIN or not result.pv:
             return None
@@ -537,7 +569,11 @@ class GomokuAI:
             from engine_p1 import ThreatResultType, VCTSolver
         except Exception:
             return None
-        solver = VCTSolver(max_nodes=2500, max_width_attack=10, max_width_defense=12)
+        solver = VCTSolver(
+            max_nodes=self.vct_max_nodes,
+            max_width_attack=self.vct_max_width_attack,
+            max_width_defense=self.vct_max_width_defense,
+        )
         result = solver.solve(board, attacker=stone, max_depth=self.vct_probe_depth)
         if result.result != ThreatResultType.WIN or not result.pv:
             return None
@@ -637,13 +673,15 @@ class GomokuAI:
     ) -> Tuple[Optional[Move], int]:
         best: Optional[Move] = None
         best_score = -10**18
+        root_hash = self._board_hash(board)
 
-        moves = self._sorted_moves(board, self._candidate_moves(board, ai_stone), ai_stone, ply=0)
+        moves = self._sorted_moves(board, self._candidate_moves(board, ai_stone), ai_stone, ply=0, board_hash=root_hash)
         for move in moves:
             self._check_timeout()
             if not self._is_legal_move(board, move.x, move.y, ai_stone):
                 continue
             board.place(move.x, move.y, ai_stone)
+            child_hash = self._xor_hash_move(root_hash, move.x, move.y, ai_stone)
             score = self.WIN_SCORE if board.winner == ai_stone else self._minimax(
                 board=board,
                 depth=depth - 1,
@@ -653,6 +691,7 @@ class GomokuAI:
                 alpha=alpha,
                 beta=beta,
                 ply=1,
+                board_hash=child_hash,
             )
             board.remove(move.x, move.y)
             if score > best_score:
@@ -672,13 +711,22 @@ class GomokuAI:
         alpha: int,
         beta: int,
         ply: int,
+        board_hash: int,
     ) -> int:
         self._check_timeout()
-        zobrist = self._board_hash(board)
-        cache_key = (zobrist, depth, maximizing, ai_stone, current_stone)
+        cache_key = (board_hash, maximizing, ai_stone, current_stone)
+        alpha_orig = alpha
+        beta_orig = beta
         cached = self._tt.get(cache_key)
-        if cached is not None:
-            return cached
+        if cached is not None and cached.depth >= depth:
+            if cached.flag == self.TT_EXACT:
+                return cached.score
+            if cached.flag == self.TT_LOWER:
+                alpha = max(alpha, cached.score)
+            elif cached.flag == self.TT_UPPER:
+                beta = min(beta, cached.score)
+            if alpha >= beta:
+                return cached.score
 
         if depth <= 0 or board.is_game_over:
             if board.is_game_over:
@@ -695,23 +743,29 @@ class GomokuAI:
                 )
             else:
                 score = self.evaluate_board(board, ai_stone)
-            self._tt[cache_key] = score
+            self._tt[cache_key] = TTEntry(score=score, flag=self.TT_EXACT, depth=depth)
             return score
 
         forced = self._forced_move(board, current_stone)
         if forced is not None:
             score = self.FORCE_SCORE if current_stone == ai_stone else -self.FORCE_SCORE
-            self._tt[cache_key] = score
+            self._tt[cache_key] = TTEntry(score=score, flag=self.TT_EXACT, depth=depth)
             return score
 
-        moves = self._sorted_moves(board, self._candidate_moves(board, current_stone), current_stone, ply=ply)
+        moves = self._sorted_moves(
+            board,
+            self._candidate_moves(board, current_stone),
+            current_stone,
+            ply=ply,
+            board_hash=board_hash,
+        )
         if self.use_iid and depth >= self.iid_min_depth and len(moves) > 1:
-            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply)
+            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply, board_hash)
             if hint is not None:
                 moves = self._prioritize_hint(moves, hint)
         if not moves:
             score = self.evaluate_board(board, ai_stone)
-            self._tt[cache_key] = score
+            self._tt[cache_key] = TTEntry(score=score, flag=self.TT_EXACT, depth=depth)
             return score
 
         if maximizing:
@@ -719,26 +773,59 @@ class GomokuAI:
             best_cut: Optional[Move] = None
             has_legal = False
             first = True
-            for move in moves:
+            for index, move in enumerate(moves):
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
                 has_legal = True
                 board.place(move.x, move.y, current_stone)
+                child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
                 next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
                 if board.winner == current_stone:
                     score = self.WIN_SCORE - (self._iterative_depth - depth)
                 elif self.use_pvs and not first:
                     score = self._minimax(
-                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1
+                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1, child_hash
                     )
                     if alpha < score < beta:
                         score = self._minimax(
-                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
                         )
                 else:
-                    score = self._minimax(
-                        board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                    # LMR: reduce late, quiet moves and re-search only if needed.
+                    reduced = (
+                        depth >= self.LMR_MIN_DEPTH
+                        and index >= self.LMR_MIN_INDEX
+                        and next_depth >= 2
+                        and not self._is_forcing_move(board, move.x, move.y, current_stone)
                     )
+                    if reduced:
+                        score = self._minimax(
+                            board,
+                            next_depth - 1,
+                            False,
+                            ai_stone,
+                            opponent(current_stone),
+                            alpha,
+                            beta,
+                            ply + 1,
+                            child_hash,
+                        )
+                        if score > alpha:
+                            score = self._minimax(
+                                board,
+                                next_depth,
+                                False,
+                                ai_stone,
+                                opponent(current_stone),
+                                alpha,
+                                beta,
+                                ply + 1,
+                                child_hash,
+                            )
+                    else:
+                        score = self._minimax(
+                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                        )
                 board.remove(move.x, move.y)
                 if score > value:
                     value = score
@@ -755,33 +842,70 @@ class GomokuAI:
                 self._history_table[(current_stone, best_cut.x, best_cut.y)] = self._history_table.get(
                     (current_stone, best_cut.x, best_cut.y), 0
                 ) + depth * depth
-            self._tt[cache_key] = value
+            flag = self.TT_EXACT
+            if value <= alpha_orig:
+                flag = self.TT_UPPER
+            elif value >= beta_orig:
+                flag = self.TT_LOWER
+            self._tt[cache_key] = TTEntry(score=value, flag=flag, depth=depth)
             return value
 
         value = 10**18
         best_cut: Optional[Move] = None
         has_legal = False
         first = True
-        for move in moves:
+        for index, move in enumerate(moves):
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
             has_legal = True
             board.place(move.x, move.y, current_stone)
+            child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
             next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
             if board.winner == current_stone:
                 score = -self.WIN_SCORE + (self._iterative_depth - depth)
             elif self.use_pvs and not first:
                 score = self._minimax(
-                    board, next_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1
+                    board, next_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1, child_hash
                 )
                 if alpha < score < beta:
                     score = self._minimax(
-                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
                     )
             else:
-                score = self._minimax(
-                    board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1
+                reduced = (
+                    depth >= self.LMR_MIN_DEPTH
+                    and index >= self.LMR_MIN_INDEX
+                    and next_depth >= 2
+                    and not self._is_forcing_move(board, move.x, move.y, current_stone)
                 )
+                if reduced:
+                    score = self._minimax(
+                        board,
+                        next_depth - 1,
+                        True,
+                        ai_stone,
+                        opponent(current_stone),
+                        alpha,
+                        beta,
+                        ply + 1,
+                        child_hash,
+                    )
+                    if score < beta:
+                        score = self._minimax(
+                            board,
+                            next_depth,
+                            True,
+                            ai_stone,
+                            opponent(current_stone),
+                            alpha,
+                            beta,
+                            ply + 1,
+                            child_hash,
+                        )
+                else:
+                    score = self._minimax(
+                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                    )
             board.remove(move.x, move.y)
             if score < value:
                 value = score
@@ -798,12 +922,19 @@ class GomokuAI:
             self._history_table[(current_stone, best_cut.x, best_cut.y)] = self._history_table.get(
                 (current_stone, best_cut.x, best_cut.y), 0
             ) + depth * depth
-        self._tt[cache_key] = value
+        flag = self.TT_EXACT
+        if value <= alpha_orig:
+            flag = self.TT_UPPER
+        elif value >= beta_orig:
+            flag = self.TT_LOWER
+        self._tt[cache_key] = TTEntry(score=value, flag=flag, depth=depth)
         return value
 
-    def _sorted_moves(self, board: GameBoard, moves: List[Move], stone: int, ply: int) -> List[Move]:
+    def _sorted_moves(self, board: GameBoard, moves: List[Move], stone: int, ply: int, board_hash: Optional[int] = None) -> List[Move]:
         move_key = tuple(sorted((move.x, move.y) for move in moves))
-        cache_key = (self._board_hash(board), stone, ply, move_key)
+        if board_hash is None:
+            board_hash = self._board_hash(board)
+        cache_key = (board_hash, stone, ply, move_key)
         if cache_key in self._move_score_cache:
             return [Move(move.x, move.y, move.score) for move in self._move_score_cache[cache_key]]
 
@@ -994,9 +1125,12 @@ class GomokuAI:
         ai_stone: int,
         depth: int,
         ply: int,
+        board_hash: int,
     ) -> Optional[Tuple[int, int]]:
         shallow_depth = max(1, depth - 2)
-        probe_moves = self._sorted_moves(board, board.focused_candidate_moves(), current_stone, ply=ply)
+        probe_moves = self._sorted_moves(
+            board, board.focused_candidate_moves(), current_stone, ply=ply, board_hash=board_hash
+        )
         if not probe_moves:
             return None
         best: Optional[Tuple[int, int]] = None
@@ -1005,6 +1139,7 @@ class GomokuAI:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
             board.place(move.x, move.y, current_stone)
+            child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
             score = self.WIN_SCORE if board.winner == current_stone else self._minimax(
                 board,
                 shallow_depth - 1,
@@ -1014,12 +1149,24 @@ class GomokuAI:
                 alpha=-10**18,
                 beta=10**18,
                 ply=ply + 1,
+                board_hash=child_hash,
             )
             board.remove(move.x, move.y)
             if score > best_score:
                 best_score = score
                 best = (move.x, move.y)
         return best
+
+    def _is_forcing_move(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        if board.winner == stone:
+            return True
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
+            if count >= 4 and open_ends >= 1:
+                return True
+            if count == 3 and open_ends == 2:
+                return True
+        return False
 
     def _prioritize_hint(self, moves: List[Move], hint: Tuple[int, int]) -> List[Move]:
         if not moves:
@@ -1176,8 +1323,9 @@ class GomokuAI:
                 score += value if stone == ai_stone else -value
         own_threat = self._threat_score(board, ai_stone, phase)
         enemy_threat = self._threat_score(board, enemy, phase)
-        score += own_threat - int(enemy_threat * self.ENEMY_THREAT_PENALTY_SCALE)
-        score += self._defense_urgency_adjustment(board, ai_stone)
+        score += own_threat - int(enemy_threat * self.enemy_threat_penalty_scale)
+        if self.use_defense_urgency:
+            score += self._defense_urgency_adjustment(board, ai_stone)
         if self.use_eval_correction and abs(score) < self.WIN_SCORE // 4:
             score += self._eval_residual(board, ai_stone, base_score=score)
         return score
@@ -1365,6 +1513,10 @@ class GomokuAI:
                     continue
                 h ^= self._zobrist_table[x][y][0 if stone == BLACK else 1]
         return h
+
+    def _xor_hash_move(self, current_hash: int, x: int, y: int, stone: int) -> int:
+        idx = 0 if stone == BLACK else 1
+        return current_hash ^ self._zobrist_table[x][y][idx]
 
     def _time_up(self) -> bool:
         return self._deadline > 0 and time.perf_counter() >= self._deadline

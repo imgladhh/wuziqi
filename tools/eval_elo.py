@@ -24,6 +24,16 @@ class EngineConfig:
     use_pvs: bool
     use_quiescence: bool
     use_threat_space: bool
+    use_vcf_probe: bool = True
+    use_vct_probe: bool = True
+    use_defense_urgency: bool = True
+    enemy_threat_penalty_scale: float = 1.35
+    vcf_max_nodes: int = 1800
+    vcf_max_width_attack: int = 8
+    vcf_max_width_defense: int = 10
+    vct_max_nodes: int = 2500
+    vct_max_width_attack: int = 10
+    vct_max_width_defense: int = 12
 
 
 @dataclass
@@ -85,6 +95,16 @@ def build_ai(config: EngineConfig, competitive: bool) -> GomokuAI:
         use_pvs=config.use_pvs,
         use_quiescence=config.use_quiescence,
         use_threat_space=config.use_threat_space,
+        use_vcf_probe=config.use_vcf_probe,
+        use_vct_probe=config.use_vct_probe,
+        use_defense_urgency=config.use_defense_urgency,
+        enemy_threat_penalty_scale=config.enemy_threat_penalty_scale,
+        vcf_max_nodes=config.vcf_max_nodes,
+        vcf_max_width_attack=config.vcf_max_width_attack,
+        vcf_max_width_defense=config.vcf_max_width_defense,
+        vct_max_nodes=config.vct_max_nodes,
+        vct_max_width_attack=config.vct_max_width_attack,
+        vct_max_width_defense=config.vct_max_width_defense,
     )
 
 
