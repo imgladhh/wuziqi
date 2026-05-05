@@ -27,6 +27,79 @@ class TTEntry:
     depth: int
 
 
+def _decode_base3(code: int, width: int = 9) -> List[int]:
+    cells = [0] * width
+    for index in range(width - 1, -1, -1):
+        cells[index] = code % 3
+        code //= 3
+    return cells
+
+
+def _line_pattern_from_window(cells: Sequence[int]) -> Tuple[int, int]:
+    center = len(cells) // 2
+    if cells[center] != 1:
+        return 0, 0
+
+    count = 1
+    left = center - 1
+    while left >= 0 and cells[left] == 1:
+        count += 1
+        left -= 1
+
+    right = center + 1
+    while right < len(cells) and cells[right] == 1:
+        count += 1
+        right += 1
+
+    open_ends = 0
+    if left >= 0 and cells[left] == EMPTY:
+        open_ends += 1
+    if right < len(cells) and cells[right] == EMPTY:
+        open_ends += 1
+    return count, open_ends
+
+
+def _build_line_pattern_tables(win_score: int) -> Dict[str, List[int]]:
+    phase_tables = {
+        "opening": {
+            (4, 2): 180_000,
+            (4, 1): 45_000,
+            (3, 2): 22_000,
+            (3, 1): 4_500,
+            (2, 2): 1_600,
+            (2, 1): 360,
+            (1, 2): 100,
+        },
+        "middle": {
+            (4, 2): 240_000,
+            (4, 1): 62_000,
+            (3, 2): 28_000,
+            (3, 1): 6_200,
+            (2, 2): 1_500,
+            (2, 1): 360,
+            (1, 2): 90,
+        },
+        "ending": {
+            (4, 2): 280_000,
+            (4, 1): 75_000,
+            (3, 2): 20_000,
+            (3, 1): 5_400,
+            (2, 2): 1_200,
+            (2, 1): 320,
+            (1, 2): 70,
+        },
+    }
+    out: Dict[str, List[int]] = {phase: [0] * (3**9) for phase in phase_tables}
+    for code in range(3**9):
+        count, open_ends = _line_pattern_from_window(_decode_base3(code))
+        for phase, table in phase_tables.items():
+            if count >= 5:
+                out[phase][code] = win_score
+            else:
+                out[phase][code] = table.get((count, open_ends), 10)
+    return out
+
+
 class GameBoard:
     def __init__(self, size: int = 15) -> None:
         self.size = size
@@ -365,6 +438,7 @@ class GomokuAI:
     TIER_OWN_FOUR_THREAT = 3
     TIER_OWN_DOUBLE_THREE = 4
     TIER_NORMAL = 5
+    _LINE_PATTERN_TABLES: Dict[str, List[int]] = {}
 
     def __init__(
         self,
@@ -381,10 +455,13 @@ class GomokuAI:
         use_vct_probe: bool = True,
         vct_probe_depth: int = 8,
         use_pattern_lookup: bool = True,
+        use_line_pattern_lookup: bool = False,
         use_aspiration: bool = True,
         aspiration_delta: int = 120,
         use_iid: bool = True,
         iid_min_depth: int = 5,
+        use_lmr: bool = True,
+        use_incremental_core_eval: bool = True,
         use_eval_correction: bool = True,
         eval_correction_limit: float = 0.10,
         use_threat_qsearch: bool = True,
@@ -411,10 +488,13 @@ class GomokuAI:
         self.use_vct_probe = use_vct_probe
         self.vct_probe_depth = max(3, vct_probe_depth)
         self.use_pattern_lookup = use_pattern_lookup
+        self.use_line_pattern_lookup = use_line_pattern_lookup
         self.use_aspiration = use_aspiration
         self.aspiration_delta = max(40, aspiration_delta)
         self.use_iid = use_iid
         self.iid_min_depth = max(3, iid_min_depth)
+        self.use_lmr = use_lmr
+        self.use_incremental_core_eval = use_incremental_core_eval
         self.use_eval_correction = use_eval_correction
         self.eval_correction_limit = max(0.01, min(0.50, eval_correction_limit))
         self.use_threat_qsearch = use_threat_qsearch
@@ -651,10 +731,12 @@ class GomokuAI:
                 use_vct_probe=False,
                 vct_probe_depth=self.vct_probe_depth,
                 use_pattern_lookup=self.use_pattern_lookup,
+                use_line_pattern_lookup=self.use_line_pattern_lookup,
                 use_aspiration=False,
                 aspiration_delta=self.aspiration_delta,
                 use_iid=self.use_iid,
                 iid_min_depth=self.iid_min_depth,
+                use_incremental_core_eval=self.use_incremental_core_eval,
                 use_eval_correction=self.use_eval_correction,
                 eval_correction_limit=self.eval_correction_limit,
                 use_threat_qsearch=self.use_threat_qsearch,
@@ -674,13 +756,18 @@ class GomokuAI:
         best: Optional[Move] = None
         best_score = -10**18
         root_hash = self._board_hash(board)
+        root_core_black, root_core_white = self._core_board_scores(board) if self.use_incremental_core_eval else (0, 0)
 
         moves = self._sorted_moves(board, self._candidate_moves(board, ai_stone), ai_stone, ply=0, board_hash=root_hash)
         for move in moves:
             self._check_timeout()
             if not self._is_legal_move(board, move.x, move.y, ai_stone):
                 continue
-            board.place(move.x, move.y, ai_stone)
+            placed, child_core_black, child_core_white = self._place_with_core(
+                board, move.x, move.y, ai_stone, root_core_black, root_core_white
+            )
+            if not placed:
+                continue
             child_hash = self._xor_hash_move(root_hash, move.x, move.y, ai_stone)
             score = self.WIN_SCORE if board.winner == ai_stone else self._minimax(
                 board=board,
@@ -692,6 +779,8 @@ class GomokuAI:
                 beta=beta,
                 ply=1,
                 board_hash=child_hash,
+                core_black=child_core_black,
+                core_white=child_core_white,
             )
             board.remove(move.x, move.y)
             if score > best_score:
@@ -712,8 +801,14 @@ class GomokuAI:
         beta: int,
         ply: int,
         board_hash: int,
+        core_black: Optional[int] = None,
+        core_white: Optional[int] = None,
     ) -> int:
         self._check_timeout()
+        if self.use_incremental_core_eval and (core_black is None or core_white is None):
+            core_black, core_white = self._core_board_scores(board)
+        elif core_black is None or core_white is None:
+            core_black, core_white = 0, 0
         cache_key = (board_hash, maximizing, ai_stone, current_stone)
         alpha_orig = alpha
         beta_orig = beta
@@ -730,7 +825,7 @@ class GomokuAI:
 
         if depth <= 0 or board.is_game_over:
             if board.is_game_over:
-                score = self.evaluate_board(board, ai_stone)
+                score = self._evaluate_board_current(board, ai_stone, core_black, core_white)
             elif self.use_quiescence:
                 score = self._quiescence(
                     board=board,
@@ -740,9 +835,11 @@ class GomokuAI:
                     alpha=alpha,
                     beta=beta,
                     qply=0,
+                    core_black=core_black,
+                    core_white=core_white,
                 )
             else:
-                score = self.evaluate_board(board, ai_stone)
+                score = self._evaluate_board_current(board, ai_stone, core_black, core_white)
             self._tt[cache_key] = TTEntry(score=score, flag=self.TT_EXACT, depth=depth)
             return score
 
@@ -760,11 +857,11 @@ class GomokuAI:
             board_hash=board_hash,
         )
         if self.use_iid and depth >= self.iid_min_depth and len(moves) > 1:
-            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply, board_hash)
+            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply, board_hash, core_black, core_white)
             if hint is not None:
                 moves = self._prioritize_hint(moves, hint)
         if not moves:
-            score = self.evaluate_board(board, ai_stone)
+            score = self._evaluate_board_current(board, ai_stone, core_black, core_white)
             self._tt[cache_key] = TTEntry(score=score, flag=self.TT_EXACT, depth=depth)
             return score
 
@@ -777,30 +874,56 @@ class GomokuAI:
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
                 has_legal = True
-                board.place(move.x, move.y, current_stone)
+                placed, child_core_black, child_core_white = self._place_with_core(
+                    board, move.x, move.y, current_stone, core_black, core_white
+                )
+                if not placed:
+                    continue
                 child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
                 next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
                 if board.winner == current_stone:
                     score = self.WIN_SCORE - (self._iterative_depth - depth)
                 elif self.use_pvs and not first:
                     reduced = (
-                        depth >= self.LMR_MIN_DEPTH
+                        self.use_lmr
+                        and depth >= self.LMR_MIN_DEPTH
                         and index >= self.LMR_MIN_INDEX
                         and next_depth >= 2
                         and not self._is_forcing_move(board, move.x, move.y, current_stone)
                     )
                     lmr_depth = next_depth - 1 if reduced else next_depth
                     score = self._minimax(
-                        board, lmr_depth, False, ai_stone, opponent(current_stone), alpha, alpha + 1, ply + 1, child_hash
+                        board,
+                        lmr_depth,
+                        False,
+                        ai_stone,
+                        opponent(current_stone),
+                        alpha,
+                        alpha + 1,
+                        ply + 1,
+                        child_hash,
+                        child_core_black,
+                        child_core_white,
                     )
                     if alpha < score < beta or (reduced and score > alpha):
                         score = self._minimax(
-                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                            board,
+                            next_depth,
+                            False,
+                            ai_stone,
+                            opponent(current_stone),
+                            alpha,
+                            beta,
+                            ply + 1,
+                            child_hash,
+                            child_core_black,
+                            child_core_white,
                         )
                 else:
                     # LMR: reduce late, quiet moves and re-search only if needed.
                     reduced = (
-                        depth >= self.LMR_MIN_DEPTH
+                        self.use_lmr
+                        and depth >= self.LMR_MIN_DEPTH
                         and index >= self.LMR_MIN_INDEX
                         and next_depth >= 2
                         and not self._is_forcing_move(board, move.x, move.y, current_stone)
@@ -816,6 +939,8 @@ class GomokuAI:
                             beta,
                             ply + 1,
                             child_hash,
+                            child_core_black,
+                            child_core_white,
                         )
                         if score > alpha:
                             score = self._minimax(
@@ -828,10 +953,22 @@ class GomokuAI:
                                 beta,
                                 ply + 1,
                                 child_hash,
+                                child_core_black,
+                                child_core_white,
                             )
                     else:
                         score = self._minimax(
-                            board, next_depth, False, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                            board,
+                            next_depth,
+                            False,
+                            ai_stone,
+                            opponent(current_stone),
+                            alpha,
+                            beta,
+                            ply + 1,
+                            child_hash,
+                            child_core_black,
+                            child_core_white,
                         )
                 board.remove(move.x, move.y)
                 if score > value:
@@ -844,7 +981,7 @@ class GomokuAI:
                     self._record_cutoff(ply, move, current_stone, depth)
                     break
             if not has_legal:
-                value = self.evaluate_board(board, ai_stone)
+                value = self._evaluate_board_current(board, ai_stone, core_black, core_white)
             if best_cut is not None:
                 self._history_table[(current_stone, best_cut.x, best_cut.y)] = self._history_table.get(
                     (current_stone, best_cut.x, best_cut.y), 0
@@ -865,29 +1002,55 @@ class GomokuAI:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
             has_legal = True
-            board.place(move.x, move.y, current_stone)
+            placed, child_core_black, child_core_white = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white
+            )
+            if not placed:
+                continue
             child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
             next_depth = depth - 1 + self._tactical_extension(board, move.x, move.y, current_stone, depth, ply)
             if board.winner == current_stone:
                 score = -self.WIN_SCORE + (self._iterative_depth - depth)
             elif self.use_pvs and not first:
                 reduced = (
-                    depth >= self.LMR_MIN_DEPTH
+                    self.use_lmr
+                    and depth >= self.LMR_MIN_DEPTH
                     and index >= self.LMR_MIN_INDEX
                     and next_depth >= 2
                     and not self._is_forcing_move(board, move.x, move.y, current_stone)
                 )
                 lmr_depth = next_depth - 1 if reduced else next_depth
                 score = self._minimax(
-                    board, lmr_depth, True, ai_stone, opponent(current_stone), beta - 1, beta, ply + 1, child_hash
+                    board,
+                    lmr_depth,
+                    True,
+                    ai_stone,
+                    opponent(current_stone),
+                    beta - 1,
+                    beta,
+                    ply + 1,
+                    child_hash,
+                    child_core_black,
+                    child_core_white,
                 )
                 if alpha < score < beta or (reduced and score < beta):
                     score = self._minimax(
-                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                        board,
+                        next_depth,
+                        True,
+                        ai_stone,
+                        opponent(current_stone),
+                        alpha,
+                        beta,
+                        ply + 1,
+                        child_hash,
+                        child_core_black,
+                        child_core_white,
                     )
             else:
                 reduced = (
-                    depth >= self.LMR_MIN_DEPTH
+                    self.use_lmr
+                    and depth >= self.LMR_MIN_DEPTH
                     and index >= self.LMR_MIN_INDEX
                     and next_depth >= 2
                     and not self._is_forcing_move(board, move.x, move.y, current_stone)
@@ -903,6 +1066,8 @@ class GomokuAI:
                         beta,
                         ply + 1,
                         child_hash,
+                        child_core_black,
+                        child_core_white,
                     )
                     if score < beta:
                         score = self._minimax(
@@ -915,10 +1080,22 @@ class GomokuAI:
                             beta,
                             ply + 1,
                             child_hash,
+                            child_core_black,
+                            child_core_white,
                         )
                 else:
                     score = self._minimax(
-                        board, next_depth, True, ai_stone, opponent(current_stone), alpha, beta, ply + 1, child_hash
+                        board,
+                        next_depth,
+                        True,
+                        ai_stone,
+                        opponent(current_stone),
+                        alpha,
+                        beta,
+                        ply + 1,
+                        child_hash,
+                        child_core_black,
+                        child_core_white,
                     )
             board.remove(move.x, move.y)
             if score < value:
@@ -931,7 +1108,7 @@ class GomokuAI:
                 self._record_cutoff(ply, move, current_stone, depth)
                 break
         if not has_legal:
-            value = self.evaluate_board(board, ai_stone)
+            value = self._evaluate_board_current(board, ai_stone, core_black, core_white)
         if best_cut is not None:
             self._history_table[(current_stone, best_cut.x, best_cut.y)] = self._history_table.get(
                 (current_stone, best_cut.x, best_cut.y), 0
@@ -1140,6 +1317,8 @@ class GomokuAI:
         depth: int,
         ply: int,
         board_hash: int,
+        core_black: int,
+        core_white: int,
     ) -> Optional[Tuple[int, int]]:
         shallow_depth = max(1, depth - 2)
         probe_moves = self._sorted_moves(
@@ -1152,7 +1331,11 @@ class GomokuAI:
         for move in probe_moves[:8]:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
-            board.place(move.x, move.y, current_stone)
+            placed, child_core_black, child_core_white = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white
+            )
+            if not placed:
+                continue
             child_hash = self._xor_hash_move(board_hash, move.x, move.y, current_stone)
             score = self.WIN_SCORE if board.winner == current_stone else self._minimax(
                 board,
@@ -1164,6 +1347,8 @@ class GomokuAI:
                 beta=10**18,
                 ply=ply + 1,
                 board_hash=child_hash,
+                core_black=child_core_black,
+                core_white=child_core_white,
             )
             board.remove(move.x, move.y)
             if score > best_score:
@@ -1344,6 +1529,101 @@ class GomokuAI:
             score += self._eval_residual(board, ai_stone, base_score=score)
         return score
 
+    def _core_board_scores(self, board: GameBoard) -> Tuple[int, int]:
+        phase = self._game_phase(board)
+        black_score = 0
+        white_score = 0
+        min_x, max_x, min_y, max_y = board.occupied_bounds(padding=1)
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
+                stone = board.get(x, y)
+                if stone == BLACK:
+                    black_score += self.evaluate_position(board, x, y, BLACK, phase)
+                elif stone == WHITE:
+                    white_score += self.evaluate_position(board, x, y, WHITE, phase)
+        return black_score, white_score
+
+    def _evaluate_board_from_core(
+        self,
+        board: GameBoard,
+        ai_stone: int,
+        core_black: int,
+        core_white: int,
+    ) -> int:
+        return core_black - core_white if ai_stone == BLACK else core_white - core_black
+
+    def _evaluate_board_current(
+        self,
+        board: GameBoard,
+        ai_stone: int,
+        core_black: int,
+        core_white: int,
+    ) -> int:
+        if self.use_incremental_core_eval:
+            return self._evaluate_board_from_core(board, ai_stone, core_black, core_white)
+        return self.evaluate_board(board, ai_stone)
+
+    def _affected_eval_points(self, board: GameBoard, x: int, y: int) -> List[Tuple[int, int]]:
+        seen: set[Tuple[int, int]] = set()
+        out: List[Tuple[int, int]] = []
+        if board.is_inside(x, y) and board.get(x, y) != EMPTY:
+            seen.add((x, y))
+            out.append((x, y))
+        for dx, dy in DIRECTIONS:
+            for sign in (-1, 1):
+                for step in range(1, 6):
+                    nx = x + sign * step * dx
+                    ny = y + sign * step * dy
+                    if not board.is_inside(nx, ny):
+                        break
+                    if board.get(nx, ny) != EMPTY and (nx, ny) not in seen:
+                        seen.add((nx, ny))
+                        out.append((nx, ny))
+        return out
+
+    def _core_score_for_points(
+        self,
+        board: GameBoard,
+        points: Sequence[Tuple[int, int]],
+        phase: str,
+    ) -> Tuple[int, int]:
+        black_score = 0
+        white_score = 0
+        for x, y in points:
+            stone = board.get(x, y)
+            if stone == BLACK:
+                black_score += self.evaluate_position(board, x, y, BLACK, phase)
+            elif stone == WHITE:
+                white_score += self.evaluate_position(board, x, y, WHITE, phase)
+        return black_score, white_score
+
+    def _place_with_core(
+        self,
+        board: GameBoard,
+        x: int,
+        y: int,
+        stone: int,
+        core_black: int,
+        core_white: int,
+    ) -> Tuple[bool, int, int]:
+        if not self.use_incremental_core_eval:
+            return board.place(x, y, stone), core_black, core_white
+
+        phase_before = self._game_phase(board)
+        affected_before = self._affected_eval_points(board, x, y)
+        old_black, old_white = self._core_score_for_points(board, affected_before, phase_before)
+        if not board.place(x, y, stone):
+            return False, core_black, core_white
+
+        phase_after = self._game_phase(board)
+        if phase_after != phase_before:
+            next_black, next_white = self._core_board_scores(board)
+            return True, next_black, next_white
+
+        affected_after = self._affected_eval_points(board, x, y)
+        new_black, new_white = self._core_score_for_points(board, affected_after, phase_after)
+        return True, core_black - old_black + new_black, core_white - old_white + new_white
+
     def _defense_urgency_adjustment(self, board: GameBoard, ai_stone: int) -> int:
         enemy = opponent(ai_stone)
         own_win_points = len(board.immediate_winning_points(ai_stone, limit=3))
@@ -1426,10 +1706,40 @@ class GomokuAI:
             phase = self._game_phase(board)
         center = board.size // 2
         total = (board.size - (abs(x - center) + abs(y - center))) * 2
+        if self.use_line_pattern_lookup:
+            for dx, dy in DIRECTIONS:
+                total += self._lookup_line_pattern_score(board, x, y, dx, dy, stone, phase)
+            return total
         for dx, dy in DIRECTIONS:
             count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
             total += self._pattern_score(count, open_ends, phase)
         return total
+
+    def _lookup_line_pattern_score(
+        self,
+        board: GameBoard,
+        x: int,
+        y: int,
+        dx: int,
+        dy: int,
+        stone: int,
+        phase: str,
+    ) -> int:
+        if not self._LINE_PATTERN_TABLES:
+            self.__class__._LINE_PATTERN_TABLES = _build_line_pattern_tables(self.WIN_SCORE)
+        code = 0
+        for offset in range(-4, 5):
+            nx = x + offset * dx
+            ny = y + offset * dy
+            code *= 3
+            if not board.is_inside(nx, ny):
+                code += 2
+                continue
+            cell = board.get(nx, ny)
+            if cell == EMPTY:
+                continue
+            code += 1 if cell == stone else 2
+        return self._LINE_PATTERN_TABLES.get(phase, self._LINE_PATTERN_TABLES["middle"])[code]
 
     def _analyze_line(self, board: GameBoard, x: int, y: int, dx: int, dy: int, stone: int) -> Tuple[int, int]:
         open_ends = 0
@@ -1559,9 +1869,15 @@ class GomokuAI:
         alpha: int,
         beta: int,
         qply: int,
+        core_black: Optional[int] = None,
+        core_white: Optional[int] = None,
     ) -> int:
         self._check_timeout()
-        stand_pat = self.evaluate_board(board, ai_stone)
+        if self.use_incremental_core_eval and (core_black is None or core_white is None):
+            core_black, core_white = self._core_board_scores(board)
+        elif core_black is None or core_white is None:
+            core_black, core_white = 0, 0
+        stand_pat = self._evaluate_board_current(board, ai_stone, core_black, core_white)
         if qply >= self.QUIESCENCE_MAX_PLY:
             return stand_pat
 
@@ -1585,7 +1901,11 @@ class GomokuAI:
             for move in tactical:
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
-                board.place(move.x, move.y, current_stone)
+                placed, child_core_black, child_core_white = self._place_with_core(
+                    board, move.x, move.y, current_stone, core_black, core_white
+                )
+                if not placed:
+                    continue
                 score = self.WIN_SCORE - qply if board.winner == current_stone else self._quiescence(
                     board=board,
                     maximizing=False,
@@ -1594,6 +1914,8 @@ class GomokuAI:
                     alpha=alpha,
                     beta=beta,
                     qply=qply + 1,
+                    core_black=child_core_black,
+                    core_white=child_core_white,
                 )
                 board.remove(move.x, move.y)
                 value = max(value, score)
@@ -1606,7 +1928,11 @@ class GomokuAI:
         for move in tactical:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
-            board.place(move.x, move.y, current_stone)
+            placed, child_core_black, child_core_white = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white
+            )
+            if not placed:
+                continue
             score = -self.WIN_SCORE + qply if board.winner == current_stone else self._quiescence(
                 board=board,
                 maximizing=True,
@@ -1615,6 +1941,8 @@ class GomokuAI:
                 alpha=alpha,
                 beta=beta,
                 qply=qply + 1,
+                core_black=child_core_black,
+                core_white=child_core_white,
             )
             board.remove(move.x, move.y)
             value = min(value, score)

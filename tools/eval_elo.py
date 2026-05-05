@@ -24,6 +24,7 @@ class EngineConfig:
     use_pvs: bool
     use_quiescence: bool
     use_threat_space: bool
+    use_lmr: bool = True
     use_vcf_probe: bool = True
     use_vct_probe: bool = True
     use_defense_urgency: bool = True
@@ -95,6 +96,7 @@ def build_ai(config: EngineConfig, competitive: bool) -> GomokuAI:
         use_pvs=config.use_pvs,
         use_quiescence=config.use_quiescence,
         use_threat_space=config.use_threat_space,
+        use_lmr=config.use_lmr,
         use_vcf_probe=config.use_vcf_probe,
         use_vct_probe=config.use_vct_probe,
         use_defense_urgency=config.use_defense_urgency,
@@ -460,6 +462,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-b", type=int, default=3)
     parser.add_argument("--time-a", type=int, default=800, help="Per-move time budget for engine A (ms).")
     parser.add_argument("--time-b", type=int, default=1200, help="Per-move time budget for engine B (ms).")
+    parser.add_argument("--disable-lmr-a", action="store_true", help="Disable LMR for engine A.")
+    parser.add_argument("--disable-lmr-b", action="store_true", help="Disable LMR for engine B.")
     parser.add_argument("--output", type=str, default="reports/elo_report.md")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar output.")
     parser.add_argument("--ablation", action="store_true", help="Run module ablation suite against baseline in one pass.")
@@ -481,6 +485,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config_a, config_b = default_configs(args.depth_a, args.depth_b, args.time_a, args.time_b)
+    if args.disable_lmr_a:
+        config_a.use_lmr = False
+    if args.disable_lmr_b:
+        config_b.use_lmr = False
     show_progress = not args.no_progress
 
     output_path = Path(args.output)

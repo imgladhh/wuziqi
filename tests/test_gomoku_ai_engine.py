@@ -187,6 +187,65 @@ class AiEngineUpgradeTests(unittest.TestCase):
         blocked_score = ai.evaluate_board(board_blocked, BLACK)
         self.assertGreater(blocked_score, risky_score)
 
+    def test_pattern_lookup_matches_legacy_position_eval(self) -> None:
+        board = GameBoard()
+        moves = (
+            (7, 7, BLACK),
+            (8, 7, WHITE),
+            (7, 8, BLACK),
+            (6, 7, WHITE),
+            (7, 6, BLACK),
+            (9, 7, WHITE),
+            (5, 5, BLACK),
+            (5, 6, WHITE),
+            (6, 6, BLACK),
+            (9, 9, WHITE),
+        )
+        for x, y, stone in moves:
+            self.assertTrue(board.place(x, y, stone))
+
+        lookup_ai = GomokuAI(depth=2, use_line_pattern_lookup=True)
+        legacy_ai = GomokuAI(depth=2, use_pattern_lookup=False)
+        for phase in ("opening", "middle", "ending"):
+            for x, y, stone in moves:
+                self.assertEqual(
+                    legacy_ai.evaluate_position(board, x, y, stone, phase),
+                    lookup_ai.evaluate_position(board, x, y, stone, phase),
+                )
+
+    def test_incremental_core_score_matches_full_recompute(self) -> None:
+        board = GameBoard()
+        for x, y, stone in (
+            (7, 7, BLACK),
+            (8, 7, WHITE),
+            (7, 8, BLACK),
+            (8, 8, WHITE),
+            (6, 7, BLACK),
+            (9, 7, WHITE),
+            (6, 8, BLACK),
+            (9, 8, WHITE),
+        ):
+            self.assertTrue(board.place(x, y, stone))
+
+        ai = GomokuAI(depth=2, use_opening_book=False, use_incremental_core_eval=True)
+        core_black, core_white = ai._core_board_scores(board)
+        self.assertEqual((core_black, core_white), ai._core_board_scores(board))
+
+        placed, next_black, next_white = ai._place_with_core(board, 7, 9, BLACK, core_black, core_white)
+        self.assertTrue(placed)
+        self.assertEqual((next_black, next_white), ai._core_board_scores(board))
+        self.assertEqual(
+            next_black - next_white,
+            ai._evaluate_board_from_core(board, BLACK, next_black, next_white),
+        )
+
+        board.remove(7, 9)
+        self.assertEqual((core_black, core_white), ai._core_board_scores(board))
+        self.assertEqual(
+            core_white - core_black,
+            ai._evaluate_board_from_core(board, WHITE, core_black, core_white),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
