@@ -231,7 +231,7 @@ class AiEngineUpgradeTests(unittest.TestCase):
         core_black, core_white = ai._core_board_scores(board)
         self.assertEqual((core_black, core_white), ai._core_board_scores(board))
 
-        placed, next_black, next_white = ai._place_with_core(board, 7, 9, BLACK, core_black, core_white)
+        placed, next_black, next_white, _next_state = ai._place_with_core(board, 7, 9, BLACK, core_black, core_white)
         self.assertTrue(placed)
         self.assertEqual((next_black, next_white), ai._core_board_scores(board))
         self.assertEqual(
@@ -245,6 +245,43 @@ class AiEngineUpgradeTests(unittest.TestCase):
             core_white - core_black,
             ai._evaluate_board_from_core(board, WHITE, core_black, core_white),
         )
+
+    def test_segment_core_rewards_double_open_three(self) -> None:
+        single = GameBoard()
+        for x, y in ((7, 6), (7, 7), (7, 8)):
+            self.assertTrue(single.place(x, y, BLACK))
+
+        double = GameBoard()
+        for x, y in ((7, 6), (7, 7), (7, 8), (6, 7), (8, 7)):
+            self.assertTrue(double.place(x, y, BLACK))
+
+        ai = GomokuAI(depth=2, use_segment_core_eval=True, use_incremental_core_eval=True)
+        single_black, _single_white = ai._core_board_scores(single)
+        double_black, _double_white = ai._core_board_scores(double)
+        self.assertGreater(double_black, single_black + 100_000)
+
+    def test_segment_core_place_matches_full_recompute(self) -> None:
+        board = GameBoard()
+        for x, y, stone in (
+            (7, 7, BLACK),
+            (8, 7, WHITE),
+            (7, 8, BLACK),
+            (8, 8, WHITE),
+            (6, 7, BLACK),
+            (9, 7, WHITE),
+        ):
+            self.assertTrue(board.place(x, y, stone))
+
+        ai = GomokuAI(depth=2, use_segment_core_eval=True, use_incremental_core_eval=True)
+        core_black, core_white = ai._core_board_scores(board)
+        state = ai._segment_core_state(board)
+        placed, next_black, next_white, next_state = ai._place_with_core(
+            board, 6, 8, BLACK, core_black, core_white, state
+        )
+        self.assertTrue(placed)
+        self.assertEqual((next_black, next_white), ai._core_board_scores(board))
+        self.assertIsNotNone(next_state)
+        self.assertEqual((next_state.score_black, next_state.score_white), ai._core_board_scores(board))
 
 
 if __name__ == "__main__":

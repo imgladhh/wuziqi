@@ -254,6 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-opening-book", action="store_true", help="Disable opening-book shortcut in benchmark runs.")
     parser.add_argument("--disable-vcf-vct", action="store_true", help="Disable VCF/VCT root probes in benchmark runs.")
     parser.add_argument("--disable-defense-urgency", action="store_true", help="Disable defensive urgency adjustment.")
+    parser.add_argument("--enable-segment-core", action="store_true", help="Use experimental incremental segment-line core eval.")
     parser.add_argument("--enemy-threat-scale", type=float, default=1.35, help="Enemy threat penalty scale.")
     parser.add_argument("--vcf-max-nodes", type=int, default=1800)
     parser.add_argument("--vct-max-nodes", type=int, default=2500)
@@ -283,6 +284,7 @@ def main() -> None:
         use_vcf_probe=not bool(args.disable_vcf_vct),
         use_vct_probe=not bool(args.disable_vcf_vct),
         use_defense_urgency=not bool(args.disable_defense_urgency),
+        use_segment_core_eval=bool(args.enable_segment_core),
         enemy_threat_penalty_scale=float(args.enemy_threat_scale),
         vcf_max_nodes=int(args.vcf_max_nodes),
         vct_max_nodes=int(args.vct_max_nodes),

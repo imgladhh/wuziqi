@@ -137,6 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rules", type=str, default="bench/rules.json")
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--time-ms", type=int, default=800)
+    parser.add_argument("--enable-segment-core", action="store_true", help="Use experimental incremental segment-line core eval.")
     parser.add_argument("--output", type=str, default="", help="Optional JSON output path.")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar output.")
     return parser.parse_args()
@@ -149,7 +150,14 @@ def main() -> None:
     if not tactical_cases and not rule_cases:
         raise SystemExit("No benchmark cases found.")
 
-    ai = GomokuAI(depth=args.depth, time_limit_ms=args.time_ms, use_pvs=True, use_quiescence=True, use_threat_space=True)
+    ai = GomokuAI(
+        depth=args.depth,
+        time_limit_ms=args.time_ms,
+        use_pvs=True,
+        use_quiescence=True,
+        use_threat_space=True,
+        use_segment_core_eval=bool(args.enable_segment_core),
+    )
 
     show_progress = not args.no_progress
     total_steps = len(tactical_cases) + len(rule_cases)

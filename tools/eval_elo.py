@@ -25,10 +25,23 @@ class EngineConfig:
     use_quiescence: bool
     use_threat_space: bool
     use_lmr: bool = True
+    use_segment_core_eval: bool = False
     use_vcf_probe: bool = True
     use_vct_probe: bool = True
     use_defense_urgency: bool = True
     enemy_threat_penalty_scale: float = 1.35
+    enemy_pattern_scale: float = 1.0
+    score_open_four: int = 240_000
+    score_half_four: int = 62_000
+    score_open_three: int = 28_000
+    score_half_three: int = 6_200
+    score_open_two: int = 1_500
+    score_half_two: int = 360
+    own_win_point_bonus: int = 170_000
+    enemy_win_point_penalty: int = 420_000
+    own_open_four_bonus: int = 85_000
+    enemy_open_four_penalty: int = 160_000
+    enemy_major_threat_penalty: int = 42_000
     vcf_max_nodes: int = 1800
     vcf_max_width_attack: int = 8
     vcf_max_width_defense: int = 10
@@ -97,10 +110,23 @@ def build_ai(config: EngineConfig, competitive: bool) -> GomokuAI:
         use_quiescence=config.use_quiescence,
         use_threat_space=config.use_threat_space,
         use_lmr=config.use_lmr,
+        use_segment_core_eval=config.use_segment_core_eval,
         use_vcf_probe=config.use_vcf_probe,
         use_vct_probe=config.use_vct_probe,
         use_defense_urgency=config.use_defense_urgency,
         enemy_threat_penalty_scale=config.enemy_threat_penalty_scale,
+        enemy_pattern_scale=config.enemy_pattern_scale,
+        score_open_four=config.score_open_four,
+        score_half_four=config.score_half_four,
+        score_open_three=config.score_open_three,
+        score_half_three=config.score_half_three,
+        score_open_two=config.score_open_two,
+        score_half_two=config.score_half_two,
+        own_win_point_bonus=config.own_win_point_bonus,
+        enemy_win_point_penalty=config.enemy_win_point_penalty,
+        own_open_four_bonus=config.own_open_four_bonus,
+        enemy_open_four_penalty=config.enemy_open_four_penalty,
+        enemy_major_threat_penalty=config.enemy_major_threat_penalty,
         vcf_max_nodes=config.vcf_max_nodes,
         vcf_max_width_attack=config.vcf_max_width_attack,
         vcf_max_width_defense=config.vcf_max_width_defense,
@@ -464,6 +490,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-b", type=int, default=1200, help="Per-move time budget for engine B (ms).")
     parser.add_argument("--disable-lmr-a", action="store_true", help="Disable LMR for engine A.")
     parser.add_argument("--disable-lmr-b", action="store_true", help="Disable LMR for engine B.")
+    parser.add_argument("--enable-segment-core-a", action="store_true", help="Use experimental segment-line core eval for engine A.")
+    parser.add_argument("--enable-segment-core-b", action="store_true", help="Use experimental segment-line core eval for engine B.")
+    parser.add_argument("--disable-segment-core-a", action="store_true", help="Use the older per-stone core eval for engine A.")
+    parser.add_argument("--disable-segment-core-b", action="store_true", help="Use the older per-stone core eval for engine B.")
     parser.add_argument("--output", type=str, default="reports/elo_report.md")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar output.")
     parser.add_argument("--ablation", action="store_true", help="Run module ablation suite against baseline in one pass.")
@@ -489,6 +519,14 @@ def main() -> None:
         config_a.use_lmr = False
     if args.disable_lmr_b:
         config_b.use_lmr = False
+    if args.enable_segment_core_a:
+        config_a.use_segment_core_eval = True
+    if args.enable_segment_core_b:
+        config_b.use_segment_core_eval = True
+    if args.disable_segment_core_a:
+        config_a.use_segment_core_eval = False
+    if args.disable_segment_core_b:
+        config_b.use_segment_core_eval = False
     show_progress = not args.no_progress
 
     output_path = Path(args.output)

@@ -27,6 +27,25 @@ class TTEntry:
     depth: int
 
 
+@dataclass(frozen=True)
+class SegmentLineEntry:
+    black_score: int
+    white_score: int
+    black_counts: Tuple[int, int, int, int]
+    white_counts: Tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class SegmentCoreState:
+    raw_black: int
+    raw_white: int
+    score_black: int
+    score_white: int
+    black_counts: Tuple[int, int, int, int]
+    white_counts: Tuple[int, int, int, int]
+    line_entries: Tuple[SegmentLineEntry, ...]
+
+
 def _decode_base3(code: int, width: int = 9) -> List[int]:
     cells = [0] * width
     for index in range(width - 1, -1, -1):
@@ -98,6 +117,123 @@ def _build_line_pattern_tables(win_score: int) -> Dict[str, List[int]]:
             else:
                 out[phase][code] = table.get((count, open_ends), 10)
     return out
+
+
+def _window_has_five(cells: Sequence[int]) -> bool:
+    run = 0
+    for cell in cells:
+        run = run + 1 if cell == 1 else 0
+        if run >= 5:
+            return True
+    return False
+
+
+def _window_winning_points(cells: Sequence[int]) -> set[int]:
+    points: set[int] = set()
+    mutable = list(cells)
+    for index, cell in enumerate(cells):
+        if cell != EMPTY:
+            continue
+        mutable[index] = 1
+        if _window_has_five(mutable):
+            points.add(index)
+        mutable[index] = EMPTY
+    return points
+
+
+def _window_open_three_moves(cells: Sequence[int]) -> set[int]:
+    moves: set[int] = set()
+    mutable = list(cells)
+    for index, cell in enumerate(cells):
+        if cell != EMPTY:
+            continue
+        mutable[index] = 1
+        if len(_window_winning_points(mutable)) >= 2:
+            moves.add(index)
+        mutable[index] = EMPTY
+    return moves
+
+
+def _window_minor_shape_score(cells: Sequence[int], phase: str) -> int:
+    open_two = 0
+    blocked_three = 0
+    index = 0
+    while index < len(cells):
+        if cells[index] != 1:
+            index += 1
+            continue
+        start = index
+        while index < len(cells) and cells[index] == 1:
+            index += 1
+        length = index - start
+        left_open = start > 0 and cells[start - 1] == EMPTY
+        right_open = index < len(cells) and cells[index] == EMPTY
+        open_ends = int(left_open) + int(right_open)
+        if length == 3 and open_ends == 1:
+            blocked_three += 1
+        elif length == 2 and open_ends == 2:
+            open_two += 1
+    if phase == "opening":
+        return open_two * 1_200 + blocked_three * 2_800
+    if phase == "ending":
+        return open_two * 900 + blocked_three * 3_200
+    return open_two * 1_000 + blocked_three * 3_000
+
+
+def _phase_four_score(phase: str) -> int:
+    if phase == "opening":
+        return 45_000
+    if phase == "ending":
+        return 75_000
+    return 62_000
+
+
+def _phase_open_three_score(phase: str) -> int:
+    if phase == "opening":
+        return 22_000
+    if phase == "ending":
+        return 20_000
+    return 28_000
+
+
+def _segment_window_entry(cells: Sequence[int], phase: str, win_score: int) -> Tuple[int, int, int, int, int]:
+    if _window_has_five(cells):
+        return win_score, 0, 0, 0, 1
+
+    score = 0
+    open_three = 0
+    four = 0
+    open_four = 0
+    win_points = _window_winning_points(cells)
+    if len(win_points) >= 2:
+        open_four = len(win_points)
+        score += 780_000 + (len(win_points) - 2) * 120_000
+    elif len(win_points) == 1:
+        four = 1
+        score += _phase_four_score(phase)
+
+    open_three_moves = _window_open_three_moves(cells)
+    open_three = len(open_three_moves)
+    if open_three == 1:
+        score += _phase_open_three_score(phase)
+    elif open_three >= 2:
+        score += 120_000 + (open_three - 2) * 35_000
+
+    score += _window_minor_shape_score(cells, phase)
+    return score, open_three, four, open_four, 0
+
+
+def _build_segment_window_tables(win_score: int) -> Dict[str, List[Tuple[int, int, int, int, int]]]:
+    tables: Dict[str, List[Tuple[int, int, int, int, int]]] = {
+        "opening": [(0, 0, 0, 0, 0)] * (3**9),
+        "middle": [(0, 0, 0, 0, 0)] * (3**9),
+        "ending": [(0, 0, 0, 0, 0)] * (3**9),
+    }
+    for code in range(3**9):
+        cells = _decode_base3(code)
+        for phase in tables:
+            tables[phase][code] = _segment_window_entry(cells, phase, win_score)
+    return tables
 
 
 class GameBoard:
@@ -439,6 +575,8 @@ class GomokuAI:
     TIER_OWN_DOUBLE_THREE = 4
     TIER_NORMAL = 5
     _LINE_PATTERN_TABLES: Dict[str, List[int]] = {}
+    _SEGMENT_WINDOW_TABLES: Dict[str, List[Tuple[int, int, int, int, int]]] = {}
+    _SEGMENT_GEOMETRY_CACHE: Dict[int, Tuple[Tuple[Tuple[Tuple[int, int], ...], ...], Dict[Tuple[int, int], Tuple[int, ...]]]] = {}
 
     def __init__(
         self,
@@ -462,6 +600,7 @@ class GomokuAI:
         iid_min_depth: int = 5,
         use_lmr: bool = True,
         use_incremental_core_eval: bool = True,
+        use_segment_core_eval: bool = False,
         use_eval_correction: bool = True,
         eval_correction_limit: float = 0.10,
         use_threat_qsearch: bool = True,
@@ -470,6 +609,18 @@ class GomokuAI:
         smp_depth_offset: int = 1,
         use_defense_urgency: bool = True,
         enemy_threat_penalty_scale: float = ENEMY_THREAT_PENALTY_SCALE,
+        enemy_pattern_scale: float = 1.0,
+        score_open_four: int = 240_000,
+        score_half_four: int = 62_000,
+        score_open_three: int = 28_000,
+        score_half_three: int = 6_200,
+        score_open_two: int = 1_500,
+        score_half_two: int = 360,
+        own_win_point_bonus: int = OWN_WIN_POINT_BONUS,
+        enemy_win_point_penalty: int = ENEMY_WIN_POINT_PENALTY,
+        own_open_four_bonus: int = OWN_OPEN_FOUR_BONUS,
+        enemy_open_four_penalty: int = ENEMY_OPEN_FOUR_PENALTY,
+        enemy_major_threat_penalty: int = ENEMY_MAJOR_THREAT_PENALTY,
         vcf_max_nodes: int = 1800,
         vcf_max_width_attack: int = 8,
         vcf_max_width_defense: int = 10,
@@ -495,6 +646,7 @@ class GomokuAI:
         self.iid_min_depth = max(3, iid_min_depth)
         self.use_lmr = use_lmr
         self.use_incremental_core_eval = use_incremental_core_eval
+        self.use_segment_core_eval = use_segment_core_eval
         self.use_eval_correction = use_eval_correction
         self.eval_correction_limit = max(0.01, min(0.50, eval_correction_limit))
         self.use_threat_qsearch = use_threat_qsearch
@@ -503,6 +655,41 @@ class GomokuAI:
         self.smp_depth_offset = max(0, smp_depth_offset)
         self.use_defense_urgency = use_defense_urgency
         self.enemy_threat_penalty_scale = max(0.5, min(2.5, enemy_threat_penalty_scale))
+        self.enemy_pattern_scale = max(0.5, min(3.0, enemy_pattern_scale))
+        self.pattern_scores = {
+            "opening": {
+                (4, 2): 180_000,
+                (4, 1): 45_000,
+                (3, 2): 22_000,
+                (3, 1): 4_500,
+                (2, 2): 1_600,
+                (2, 1): 360,
+                (1, 2): 100,
+            },
+            "middle": {
+                (4, 2): max(1, int(score_open_four)),
+                (4, 1): max(1, int(score_half_four)),
+                (3, 2): max(1, int(score_open_three)),
+                (3, 1): max(1, int(score_half_three)),
+                (2, 2): max(1, int(score_open_two)),
+                (2, 1): max(1, int(score_half_two)),
+                (1, 2): 90,
+            },
+            "ending": {
+                (4, 2): 280_000,
+                (4, 1): 75_000,
+                (3, 2): 20_000,
+                (3, 1): 5_400,
+                (2, 2): 1_200,
+                (2, 1): 320,
+                (1, 2): 70,
+            },
+        }
+        self.own_win_point_bonus = max(0, int(own_win_point_bonus))
+        self.enemy_win_point_penalty = max(0, int(enemy_win_point_penalty))
+        self.own_open_four_bonus = max(0, int(own_open_four_bonus))
+        self.enemy_open_four_penalty = max(0, int(enemy_open_four_penalty))
+        self.enemy_major_threat_penalty = max(0, int(enemy_major_threat_penalty))
         self.vcf_max_nodes = max(300, vcf_max_nodes)
         self.vcf_max_width_attack = max(2, vcf_max_width_attack)
         self.vcf_max_width_defense = max(2, vcf_max_width_defense)
@@ -737,9 +924,24 @@ class GomokuAI:
                 use_iid=self.use_iid,
                 iid_min_depth=self.iid_min_depth,
                 use_incremental_core_eval=self.use_incremental_core_eval,
+                use_segment_core_eval=self.use_segment_core_eval,
                 use_eval_correction=self.use_eval_correction,
                 eval_correction_limit=self.eval_correction_limit,
                 use_threat_qsearch=self.use_threat_qsearch,
+                use_defense_urgency=self.use_defense_urgency,
+                enemy_threat_penalty_scale=self.enemy_threat_penalty_scale,
+                enemy_pattern_scale=self.enemy_pattern_scale,
+                score_open_four=self.pattern_scores["middle"][(4, 2)],
+                score_half_four=self.pattern_scores["middle"][(4, 1)],
+                score_open_three=self.pattern_scores["middle"][(3, 2)],
+                score_half_three=self.pattern_scores["middle"][(3, 1)],
+                score_open_two=self.pattern_scores["middle"][(2, 2)],
+                score_half_two=self.pattern_scores["middle"][(2, 1)],
+                own_win_point_bonus=self.own_win_point_bonus,
+                enemy_win_point_penalty=self.enemy_win_point_penalty,
+                own_open_four_bonus=self.own_open_four_bonus,
+                enemy_open_four_penalty=self.enemy_open_four_penalty,
+                enemy_major_threat_penalty=self.enemy_major_threat_penalty,
                 use_lazy_smp=False,
             )
 
@@ -756,15 +958,22 @@ class GomokuAI:
         best: Optional[Move] = None
         best_score = -10**18
         root_hash = self._board_hash(board)
-        root_core_black, root_core_white = self._core_board_scores(board) if self.use_incremental_core_eval else (0, 0)
+        root_core_state: Optional[SegmentCoreState] = None
+        if self.use_incremental_core_eval and self.use_segment_core_eval:
+            root_core_state = self._segment_core_state(board)
+            root_core_black, root_core_white = root_core_state.score_black, root_core_state.score_white
+        elif self.use_incremental_core_eval:
+            root_core_black, root_core_white = self._core_board_scores(board)
+        else:
+            root_core_black, root_core_white = 0, 0
 
         moves = self._sorted_moves(board, self._candidate_moves(board, ai_stone), ai_stone, ply=0, board_hash=root_hash)
         for move in moves:
             self._check_timeout()
             if not self._is_legal_move(board, move.x, move.y, ai_stone):
                 continue
-            placed, child_core_black, child_core_white = self._place_with_core(
-                board, move.x, move.y, ai_stone, root_core_black, root_core_white
+            placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                board, move.x, move.y, ai_stone, root_core_black, root_core_white, root_core_state
             )
             if not placed:
                 continue
@@ -781,6 +990,7 @@ class GomokuAI:
                 board_hash=child_hash,
                 core_black=child_core_black,
                 core_white=child_core_white,
+                core_state=child_core_state,
             )
             board.remove(move.x, move.y)
             if score > best_score:
@@ -803,9 +1013,13 @@ class GomokuAI:
         board_hash: int,
         core_black: Optional[int] = None,
         core_white: Optional[int] = None,
+        core_state: Optional[SegmentCoreState] = None,
     ) -> int:
         self._check_timeout()
-        if self.use_incremental_core_eval and (core_black is None or core_white is None):
+        if self.use_incremental_core_eval and self.use_segment_core_eval and core_state is None:
+            core_state = self._segment_core_state(board)
+            core_black, core_white = core_state.score_black, core_state.score_white
+        elif self.use_incremental_core_eval and (core_black is None or core_white is None):
             core_black, core_white = self._core_board_scores(board)
         elif core_black is None or core_white is None:
             core_black, core_white = 0, 0
@@ -837,6 +1051,7 @@ class GomokuAI:
                     qply=0,
                     core_black=core_black,
                     core_white=core_white,
+                    core_state=core_state,
                 )
             else:
                 score = self._evaluate_board_current(board, ai_stone, core_black, core_white)
@@ -857,7 +1072,9 @@ class GomokuAI:
             board_hash=board_hash,
         )
         if self.use_iid and depth >= self.iid_min_depth and len(moves) > 1:
-            hint = self._iid_probe_move(board, current_stone, ai_stone, depth, ply, board_hash, core_black, core_white)
+            hint = self._iid_probe_move(
+                board, current_stone, ai_stone, depth, ply, board_hash, core_black, core_white, core_state
+            )
             if hint is not None:
                 moves = self._prioritize_hint(moves, hint)
         if not moves:
@@ -874,8 +1091,8 @@ class GomokuAI:
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
                 has_legal = True
-                placed, child_core_black, child_core_white = self._place_with_core(
-                    board, move.x, move.y, current_stone, core_black, core_white
+                placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                    board, move.x, move.y, current_stone, core_black, core_white, core_state
                 )
                 if not placed:
                     continue
@@ -904,6 +1121,7 @@ class GomokuAI:
                         child_hash,
                         child_core_black,
                         child_core_white,
+                        child_core_state,
                     )
                     if alpha < score < beta or (reduced and score > alpha):
                         score = self._minimax(
@@ -918,6 +1136,7 @@ class GomokuAI:
                             child_hash,
                             child_core_black,
                             child_core_white,
+                            child_core_state,
                         )
                 else:
                     # LMR: reduce late, quiet moves and re-search only if needed.
@@ -941,6 +1160,7 @@ class GomokuAI:
                             child_hash,
                             child_core_black,
                             child_core_white,
+                            child_core_state,
                         )
                         if score > alpha:
                             score = self._minimax(
@@ -955,6 +1175,7 @@ class GomokuAI:
                                 child_hash,
                                 child_core_black,
                                 child_core_white,
+                                child_core_state,
                             )
                     else:
                         score = self._minimax(
@@ -969,6 +1190,7 @@ class GomokuAI:
                             child_hash,
                             child_core_black,
                             child_core_white,
+                            child_core_state,
                         )
                 board.remove(move.x, move.y)
                 if score > value:
@@ -1002,8 +1224,8 @@ class GomokuAI:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
             has_legal = True
-            placed, child_core_black, child_core_white = self._place_with_core(
-                board, move.x, move.y, current_stone, core_black, core_white
+            placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white, core_state
             )
             if not placed:
                 continue
@@ -1032,6 +1254,7 @@ class GomokuAI:
                     child_hash,
                     child_core_black,
                     child_core_white,
+                    child_core_state,
                 )
                 if alpha < score < beta or (reduced and score < beta):
                     score = self._minimax(
@@ -1046,6 +1269,7 @@ class GomokuAI:
                         child_hash,
                         child_core_black,
                         child_core_white,
+                        child_core_state,
                     )
             else:
                 reduced = (
@@ -1068,6 +1292,7 @@ class GomokuAI:
                         child_hash,
                         child_core_black,
                         child_core_white,
+                        child_core_state,
                     )
                     if score < beta:
                         score = self._minimax(
@@ -1082,6 +1307,7 @@ class GomokuAI:
                             child_hash,
                             child_core_black,
                             child_core_white,
+                            child_core_state,
                         )
                 else:
                     score = self._minimax(
@@ -1096,6 +1322,7 @@ class GomokuAI:
                         child_hash,
                         child_core_black,
                         child_core_white,
+                        child_core_state,
                     )
             board.remove(move.x, move.y)
             if score < value:
@@ -1319,6 +1546,7 @@ class GomokuAI:
         board_hash: int,
         core_black: int,
         core_white: int,
+        core_state: Optional[SegmentCoreState] = None,
     ) -> Optional[Tuple[int, int]]:
         shallow_depth = max(1, depth - 2)
         probe_moves = self._sorted_moves(
@@ -1331,8 +1559,8 @@ class GomokuAI:
         for move in probe_moves[:8]:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
-            placed, child_core_black, child_core_white = self._place_with_core(
-                board, move.x, move.y, current_stone, core_black, core_white
+            placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white, core_state
             )
             if not placed:
                 continue
@@ -1349,6 +1577,7 @@ class GomokuAI:
                 board_hash=child_hash,
                 core_black=child_core_black,
                 core_white=child_core_white,
+                core_state=child_core_state,
             )
             board.remove(move.x, move.y)
             if score > best_score:
@@ -1530,6 +1759,9 @@ class GomokuAI:
         return score
 
     def _core_board_scores(self, board: GameBoard) -> Tuple[int, int]:
+        if self.use_segment_core_eval:
+            return self._segment_board_scores(board)
+
         phase = self._game_phase(board)
         black_score = 0
         white_score = 0
@@ -1543,6 +1775,261 @@ class GomokuAI:
                     white_score += self.evaluate_position(board, x, y, WHITE, phase)
         return black_score, white_score
 
+    def _segment_board_scores(self, board: GameBoard) -> Tuple[int, int]:
+        state = self._segment_core_state(board)
+        return state.score_black, state.score_white
+
+    def _segment_core_state(self, board: GameBoard) -> SegmentCoreState:
+        phase = self._game_phase(board)
+        raw_black = 0
+        raw_white = 0
+        black_counts = (0, 0, 0, 0)
+        white_counts = (0, 0, 0, 0)
+        entries: List[SegmentLineEntry] = []
+
+        lines, _point_to_lines = self._segment_geometry(board)
+        for coords in lines:
+            cells = [board.get(x, y) for x, y in coords]
+            line_black, counts_black = self._score_segment_line(cells, BLACK, phase)
+            line_white, counts_white = self._score_segment_line(cells, WHITE, phase)
+            black_tuple = self._counts_dict_to_tuple(counts_black)
+            white_tuple = self._counts_dict_to_tuple(counts_white)
+            entries.append(SegmentLineEntry(line_black, line_white, black_tuple, white_tuple))
+            raw_black += line_black
+            raw_white += line_white
+            black_counts = self._add_count_tuples(black_counts, black_tuple)
+            white_counts = self._add_count_tuples(white_counts, white_tuple)
+
+        return self._build_segment_state(raw_black, raw_white, black_counts, white_counts, tuple(entries))
+
+    def _segment_geometry(
+        self, board: GameBoard
+    ) -> Tuple[Tuple[Tuple[Tuple[int, int], ...], ...], Dict[Tuple[int, int], Tuple[int, ...]]]:
+        cached = self._SEGMENT_GEOMETRY_CACHE.get(board.size)
+        if cached is not None:
+            return cached
+
+        size = board.size
+        lines: List[Tuple[Tuple[int, int], ...]] = []
+        point_to_lines: Dict[Tuple[int, int], List[int]] = {}
+
+        def add_line(coords: List[Tuple[int, int]]) -> None:
+            if len(coords) < 5:
+                return
+            line_id = len(lines)
+            line = tuple(coords)
+            lines.append(line)
+            for point in line:
+                point_to_lines.setdefault(point, []).append(line_id)
+
+        for x in range(size):
+            add_line([(x, y) for y in range(size)])
+        for y in range(size):
+            add_line([(x, y) for x in range(size)])
+
+        for start_y in range(size):
+            coords = []
+            x, y = 0, start_y
+            while x < size and y < size:
+                coords.append((x, y))
+                x += 1
+                y += 1
+            add_line(coords)
+        for start_x in range(1, size):
+            coords = []
+            x, y = start_x, 0
+            while x < size and y < size:
+                coords.append((x, y))
+                x += 1
+                y += 1
+            add_line(coords)
+
+        for start_y in range(size):
+            coords = []
+            x, y = 0, start_y
+            while x < size and y >= 0:
+                coords.append((x, y))
+                x += 1
+                y -= 1
+            add_line(coords)
+        for start_x in range(1, size):
+            coords = []
+            x, y = start_x, size - 1
+            while x < size and y >= 0:
+                coords.append((x, y))
+                x += 1
+                y -= 1
+            add_line(coords)
+
+        frozen_map = {point: tuple(ids) for point, ids in point_to_lines.items()}
+        cached = (tuple(lines), frozen_map)
+        self.__class__._SEGMENT_GEOMETRY_CACHE[size] = cached
+        return cached
+
+    def _build_segment_state(
+        self,
+        raw_black: int,
+        raw_white: int,
+        black_counts: Tuple[int, int, int, int],
+        white_counts: Tuple[int, int, int, int],
+        line_entries: Tuple[SegmentLineEntry, ...],
+    ) -> SegmentCoreState:
+        score_black = raw_black + self._global_segment_threat_bonus_tuple(black_counts)
+        score_white = raw_white + self._global_segment_threat_bonus_tuple(white_counts)
+        return SegmentCoreState(raw_black, raw_white, score_black, score_white, black_counts, white_counts, line_entries)
+
+    def _counts_dict_to_tuple(self, counts: Dict[str, int]) -> Tuple[int, int, int, int]:
+        return (counts["open_three"], counts["four"], counts["open_four"], counts["five"])
+
+    def _add_count_tuples(
+        self, left: Tuple[int, int, int, int], right: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int]:
+        return (left[0] + right[0], left[1] + right[1], left[2] + right[2], left[3] + right[3])
+
+    def _sub_count_tuples(
+        self, left: Tuple[int, int, int, int], right: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int]:
+        return (left[0] - right[0], left[1] - right[1], left[2] - right[2], left[3] - right[3])
+
+    def _score_segment_line(self, cells: Sequence[int], stone: int, phase: str) -> Tuple[int, Dict[str, int]]:
+        if len(cells) < 5:
+            return 0, {"open_three": 0, "four": 0, "open_four": 0, "five": 0}
+        if not self._SEGMENT_WINDOW_TABLES:
+            self.__class__._SEGMENT_WINDOW_TABLES = _build_segment_window_tables(self.WIN_SCORE)
+
+        counts = {"open_three": 0, "four": 0, "open_four": 0, "five": 0}
+        score = 0
+        perspective = [EMPTY if cell == EMPTY else 1 if cell == stone else 2 for cell in cells]
+        if len(perspective) < 9:
+            left_pad = (9 - len(perspective)) // 2
+            right_pad = 9 - len(perspective) - left_pad
+            windows = [[2] * left_pad + perspective + [2] * right_pad]
+        else:
+            windows = [perspective[start : start + 9] for start in range(0, len(perspective) - 8)]
+
+        table = self._SEGMENT_WINDOW_TABLES.get(phase, self._SEGMENT_WINDOW_TABLES["middle"])
+        for window in windows:
+            code = 0
+            for cell in window:
+                code = code * 3 + cell
+            window_score, open_three, four, open_four, five = table[code]
+            score = max(score, window_score)
+            counts["open_three"] = max(counts["open_three"], 1 if open_three else 0)
+            counts["four"] = max(counts["four"], 1 if four else 0)
+            counts["open_four"] = max(counts["open_four"], 1 if open_four else 0)
+            counts["five"] = max(counts["five"], 1 if five else 0)
+            if five:
+                return self.WIN_SCORE, counts
+        return score, counts
+
+    def _line_has_five(self, cells: Sequence[int], stone: int) -> bool:
+        run = 0
+        for cell in cells:
+            run = run + 1 if cell == stone else 0
+            if run >= 5:
+                return True
+        return False
+
+    def _line_winning_points(self, cells: Sequence[int], stone: int) -> set[int]:
+        points: set[int] = set()
+        mutable = list(cells)
+        for index, cell in enumerate(cells):
+            if cell != EMPTY:
+                continue
+            mutable[index] = stone
+            if self._line_has_five(mutable, stone):
+                points.add(index)
+            mutable[index] = EMPTY
+        return points
+
+    def _line_open_three_moves(self, cells: Sequence[int], stone: int) -> set[int]:
+        moves: set[int] = set()
+        mutable = list(cells)
+        for index, cell in enumerate(cells):
+            if cell != EMPTY:
+                continue
+            mutable[index] = stone
+            if len(self._line_winning_points(mutable, stone)) >= 2:
+                moves.add(index)
+            mutable[index] = EMPTY
+        return moves
+
+    def _line_minor_shape_score(self, cells: Sequence[int], stone: int, phase: str) -> int:
+        open_two = 0
+        blocked_three = 0
+        index = 0
+        while index < len(cells):
+            if cells[index] != stone:
+                index += 1
+                continue
+            start = index
+            while index < len(cells) and cells[index] == stone:
+                index += 1
+            length = index - start
+            left_open = start > 0 and cells[start - 1] == EMPTY
+            right_open = index < len(cells) and cells[index] == EMPTY
+            open_ends = int(left_open) + int(right_open)
+            if length == 3 and open_ends == 1:
+                blocked_three += 1
+            elif length == 2 and open_ends == 2:
+                open_two += 1
+        if phase == "opening":
+            return open_two * 1_200 + blocked_three * 2_800
+        if phase == "ending":
+            return open_two * 900 + blocked_three * 3_200
+        return open_two * 1_000 + blocked_three * 3_000
+
+    def _phase_four_score(self, phase: str) -> int:
+        if phase == "opening":
+            return 45_000
+        if phase == "ending":
+            return 75_000
+        return 62_000
+
+    def _phase_open_three_score(self, phase: str) -> int:
+        if phase == "opening":
+            return 22_000
+        if phase == "ending":
+            return 20_000
+        return 28_000
+
+    def _global_segment_threat_bonus(self, counts: Dict[str, int]) -> int:
+        if counts["five"]:
+            return self.WIN_SCORE
+        bonus = 0
+        if counts["open_four"] >= 2:
+            bonus += self.WIN_SCORE // 2
+        elif counts["open_four"] == 1:
+            bonus += 240_000
+        if counts["four"] >= 2:
+            bonus += 260_000
+        elif counts["four"] == 1:
+            bonus += 55_000
+        if counts["open_three"] >= 2:
+            bonus += 120_000 + (counts["open_three"] - 2) * 40_000
+        elif counts["open_three"] == 1:
+            bonus += 28_000
+        return bonus
+
+    def _global_segment_threat_bonus_tuple(self, counts: Tuple[int, int, int, int]) -> int:
+        open_three, four, open_four, five = counts
+        if five:
+            return self.WIN_SCORE
+        bonus = 0
+        if open_four >= 2:
+            bonus += self.WIN_SCORE // 2
+        elif open_four == 1:
+            bonus += 240_000
+        if four >= 2:
+            bonus += 260_000
+        elif four == 1:
+            bonus += 55_000
+        if open_three >= 2:
+            bonus += 120_000 + (open_three - 2) * 40_000
+        elif open_three == 1:
+            bonus += 28_000
+        return bonus
+
     def _evaluate_board_from_core(
         self,
         board: GameBoard,
@@ -1550,7 +2037,9 @@ class GomokuAI:
         core_black: int,
         core_white: int,
     ) -> int:
-        return core_black - core_white if ai_stone == BLACK else core_white - core_black
+        if ai_stone == BLACK:
+            return core_black - int(core_white * self.enemy_pattern_scale)
+        return core_white - int(core_black * self.enemy_pattern_scale)
 
     def _evaluate_board_current(
         self,
@@ -1605,24 +2094,77 @@ class GomokuAI:
         stone: int,
         core_black: int,
         core_white: int,
-    ) -> Tuple[bool, int, int]:
+        core_state: Optional[SegmentCoreState] = None,
+    ) -> Tuple[bool, int, int, Optional[SegmentCoreState]]:
         if not self.use_incremental_core_eval:
-            return board.place(x, y, stone), core_black, core_white
+            return board.place(x, y, stone), core_black, core_white, core_state
+
+        if self.use_segment_core_eval:
+            phase_before = self._game_phase(board)
+            if not board.place(x, y, stone):
+                return False, core_black, core_white, core_state
+            if self._game_phase(board) != phase_before:
+                next_state = self._segment_core_state(board)
+                return True, next_state.score_black, next_state.score_white, next_state
+            if core_state is None:
+                core_state = self._segment_core_state(board)
+                return True, core_state.score_black, core_state.score_white, core_state
+            next_state = self._update_segment_core_state(board, x, y, core_state)
+            return True, next_state.score_black, next_state.score_white, next_state
 
         phase_before = self._game_phase(board)
         affected_before = self._affected_eval_points(board, x, y)
         old_black, old_white = self._core_score_for_points(board, affected_before, phase_before)
         if not board.place(x, y, stone):
-            return False, core_black, core_white
+            return False, core_black, core_white, core_state
 
         phase_after = self._game_phase(board)
         if phase_after != phase_before:
             next_black, next_white = self._core_board_scores(board)
-            return True, next_black, next_white
+            return True, next_black, next_white, core_state
 
         affected_after = self._affected_eval_points(board, x, y)
         new_black, new_white = self._core_score_for_points(board, affected_after, phase_after)
-        return True, core_black - old_black + new_black, core_white - old_white + new_white
+        return True, core_black - old_black + new_black, core_white - old_white + new_white, core_state
+
+    def _update_segment_core_state(
+        self,
+        board: GameBoard,
+        x: int,
+        y: int,
+        state: SegmentCoreState,
+    ) -> SegmentCoreState:
+        phase = self._game_phase(board)
+        lines, point_to_lines = self._segment_geometry(board)
+        affected = point_to_lines.get((x, y), ())
+        if not affected:
+            return state
+
+        entries = list(state.line_entries)
+        raw_black = state.raw_black
+        raw_white = state.raw_white
+        black_counts = state.black_counts
+        white_counts = state.white_counts
+
+        for line_id in affected:
+            old = entries[line_id]
+            raw_black -= old.black_score
+            raw_white -= old.white_score
+            black_counts = self._sub_count_tuples(black_counts, old.black_counts)
+            white_counts = self._sub_count_tuples(white_counts, old.white_counts)
+
+            cells = [board.get(px, py) for px, py in lines[line_id]]
+            line_black, counts_black = self._score_segment_line(cells, BLACK, phase)
+            line_white, counts_white = self._score_segment_line(cells, WHITE, phase)
+            black_tuple = self._counts_dict_to_tuple(counts_black)
+            white_tuple = self._counts_dict_to_tuple(counts_white)
+            entries[line_id] = SegmentLineEntry(line_black, line_white, black_tuple, white_tuple)
+            raw_black += line_black
+            raw_white += line_white
+            black_counts = self._add_count_tuples(black_counts, black_tuple)
+            white_counts = self._add_count_tuples(white_counts, white_tuple)
+
+        return self._build_segment_state(raw_black, raw_white, black_counts, white_counts, tuple(entries))
 
     def _defense_urgency_adjustment(self, board: GameBoard, ai_stone: int) -> int:
         enemy = opponent(ai_stone)
@@ -1634,11 +2176,11 @@ class GomokuAI:
         enemy_major = len(self._find_major_threat_points(board, enemy, limit=4))
 
         swing = 0
-        swing += own_win_points * self.OWN_WIN_POINT_BONUS
-        swing -= enemy_win_points * self.ENEMY_WIN_POINT_PENALTY
-        swing += own_open_four * self.OWN_OPEN_FOUR_BONUS
-        swing -= enemy_open_four * self.ENEMY_OPEN_FOUR_PENALTY
-        swing += (own_major - enemy_major) * self.ENEMY_MAJOR_THREAT_PENALTY
+        swing += own_win_points * self.own_win_point_bonus
+        swing -= enemy_win_points * self.enemy_win_point_penalty
+        swing += own_open_four * self.own_open_four_bonus
+        swing -= enemy_open_four * self.enemy_open_four_penalty
+        swing += (own_major - enemy_major) * self.enemy_major_threat_penalty
 
         # If opponent has direct win points and we don't, force a clear defensive bias.
         if enemy_win_points > 0 and own_win_points == 0:
@@ -1762,34 +2304,7 @@ class GomokuAI:
         return count, open_ends
 
     def _pattern_score(self, count: int, open_ends: int, phase: str) -> int:
-        opening = {
-            (4, 2): 180_000,
-            (4, 1): 45_000,
-            (3, 2): 22_000,
-            (3, 1): 4_500,
-            (2, 2): 1_600,
-            (2, 1): 360,
-            (1, 2): 100,
-        }
-        middle = {
-            (4, 2): 240_000,
-            (4, 1): 62_000,
-            (3, 2): 28_000,
-            (3, 1): 6_200,
-            (2, 2): 1_500,
-            (2, 1): 360,
-            (1, 2): 90,
-        }
-        ending = {
-            (4, 2): 280_000,
-            (4, 1): 75_000,
-            (3, 2): 20_000,
-            (3, 1): 5_400,
-            (2, 2): 1_200,
-            (2, 1): 320,
-            (1, 2): 70,
-        }
-        table = opening if phase == "opening" else ending if phase == "ending" else middle
+        table = self.pattern_scores.get(phase, self.pattern_scores["middle"])
         if count >= 5:
             return self.WIN_SCORE
         if (count, open_ends) in table:
@@ -1871,9 +2386,13 @@ class GomokuAI:
         qply: int,
         core_black: Optional[int] = None,
         core_white: Optional[int] = None,
+        core_state: Optional[SegmentCoreState] = None,
     ) -> int:
         self._check_timeout()
-        if self.use_incremental_core_eval and (core_black is None or core_white is None):
+        if self.use_incremental_core_eval and self.use_segment_core_eval and core_state is None:
+            core_state = self._segment_core_state(board)
+            core_black, core_white = core_state.score_black, core_state.score_white
+        elif self.use_incremental_core_eval and (core_black is None or core_white is None):
             core_black, core_white = self._core_board_scores(board)
         elif core_black is None or core_white is None:
             core_black, core_white = 0, 0
@@ -1901,8 +2420,8 @@ class GomokuAI:
             for move in tactical:
                 if not self._is_legal_move(board, move.x, move.y, current_stone):
                     continue
-                placed, child_core_black, child_core_white = self._place_with_core(
-                    board, move.x, move.y, current_stone, core_black, core_white
+                placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                    board, move.x, move.y, current_stone, core_black, core_white, core_state
                 )
                 if not placed:
                     continue
@@ -1916,6 +2435,7 @@ class GomokuAI:
                     qply=qply + 1,
                     core_black=child_core_black,
                     core_white=child_core_white,
+                    core_state=child_core_state,
                 )
                 board.remove(move.x, move.y)
                 value = max(value, score)
@@ -1928,8 +2448,8 @@ class GomokuAI:
         for move in tactical:
             if not self._is_legal_move(board, move.x, move.y, current_stone):
                 continue
-            placed, child_core_black, child_core_white = self._place_with_core(
-                board, move.x, move.y, current_stone, core_black, core_white
+            placed, child_core_black, child_core_white, child_core_state = self._place_with_core(
+                board, move.x, move.y, current_stone, core_black, core_white, core_state
             )
             if not placed:
                 continue
@@ -1943,6 +2463,7 @@ class GomokuAI:
                 qply=qply + 1,
                 core_black=child_core_black,
                 core_white=child_core_white,
+                core_state=child_core_state,
             )
             board.remove(move.x, move.y)
             value = min(value, score)
