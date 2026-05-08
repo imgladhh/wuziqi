@@ -138,7 +138,7 @@ def apply_room_timeout(room: "Room") -> None:
 @dataclass
 class LocalGame:
     board: GameBoard = field(default_factory=GameBoard)
-    depth: int = 2
+    depth: int = 5
     current_turn: int = BLACK
     last_opponent_move: Optional[tuple[int, int]] = None
     competitive_mode: bool = False
@@ -377,7 +377,7 @@ async def index(_request: web.Request) -> web.StreamResponse:
 async def local_new(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
-    depth = int(body.get("depth", 2))
+    depth = int(body.get("depth", 5))
     competitive_mode = bool(body.get("competitive_mode", False))
     with STORE.lock:
         game = STORE.get_local(session_id)
@@ -413,7 +413,7 @@ async def local_move(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         game.current_turn = WHITE
         if not game.board.is_game_over:
-            ai = GomokuAI(game.depth)
+            ai = GomokuAI(depth=game.depth, use_c_engine=not game.competitive_mode)
             move = ai.best_move(game.board, WHITE)
             if game.board.place(move.x, move.y, WHITE):
                 game.last_opponent_move = (move.x, move.y)
@@ -656,7 +656,11 @@ async def room_hint(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u4f60\u672c\u5c40\u5df2\u7ecf\u4f7f\u7528\u8fc7 AI \u63d0\u793a\u3002"}, session_id, 400)
         remaining_before_pause = room_time_left(room)
         legal_checker = is_forbidden_move if room.competitive_mode else None
-        ai = GomokuAI(depth=3, legal_move_checker=(lambda b, px, py, s: not legal_checker(b, px, py, s)) if legal_checker else None)
+        ai = GomokuAI(
+            depth=5,
+            legal_move_checker=(lambda b, px, py, s: not legal_checker(b, px, py, s)) if legal_checker else None,
+            use_c_engine=not room.competitive_mode,
+        )
         move, reason = ai.suggest_move(room.board, stone)
         if room.competitive_mode and stone == BLACK and is_forbidden_move(room.board, move.x, move.y, stone):
             return json_response({"ok": False, "error": "\u5f53\u524d\u5c40\u9762\u6682\u65e0\u5408\u6cd5\u7684 AI \u5efa\u8bae\u843d\u70b9\u3002"}, session_id, 400)

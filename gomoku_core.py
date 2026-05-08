@@ -599,6 +599,7 @@ class GomokuAI:
         use_iid: bool = True,
         iid_min_depth: int = 5,
         use_lmr: bool = True,
+        use_c_engine: bool = False,
         use_incremental_core_eval: bool = True,
         use_segment_core_eval: bool = False,
         use_eval_correction: bool = True,
@@ -645,6 +646,7 @@ class GomokuAI:
         self.use_iid = use_iid
         self.iid_min_depth = max(3, iid_min_depth)
         self.use_lmr = use_lmr
+        self.use_c_engine = use_c_engine
         self.use_incremental_core_eval = use_incremental_core_eval
         self.use_segment_core_eval = use_segment_core_eval
         self.use_eval_correction = use_eval_correction
@@ -720,6 +722,11 @@ class GomokuAI:
                 if board.is_inside(opening.x, opening.y) and board.get(opening.x, opening.y) == EMPTY:
                     return Move(opening.x, opening.y)
         limit_ms = self.time_limit_ms if self.time_limit_ms is not None else self.DEFAULT_TIME_LIMIT_MS
+
+        c_move = self._c_engine_move(board, ai_stone, limit_ms)
+        if c_move is not None:
+            return c_move
+
         self._deadline = time.perf_counter() + max(0.15, limit_ms / 1000.0)
 
         forced = self._forced_move(board, ai_stone)
@@ -787,6 +794,42 @@ class GomokuAI:
             if self._is_legal_move(board, move.x, move.y, ai_stone):
                 return Move(move.x, move.y)
         return Move(board.size // 2, board.size // 2)
+
+    def _c_engine_move(self, board: GameBoard, ai_stone: int, limit_ms: int) -> Optional[Move]:
+        if not self.use_c_engine:
+            return None
+        # The first C backend intentionally mirrors regular Gomoku only. Competitive
+        # Renju forbidden-move checks continue through the Python engine.
+        if board.size != 15 or self._legal_move_checker is not None:
+            return None
+        try:
+            from engine_c.c_bridge import c_best_move
+        except Exception:
+            return None
+        weights = {
+            "score_open_four": self.pattern_scores["middle"][(4, 2)],
+            "score_half_four": self.pattern_scores["middle"][(4, 1)],
+            "score_open_three": self.pattern_scores["middle"][(3, 2)],
+            "score_half_three": self.pattern_scores["middle"][(3, 1)],
+            "score_open_two": self.pattern_scores["middle"][(2, 2)],
+            "score_half_two": self.pattern_scores["middle"][(2, 1)],
+            "enemy_scale": self.enemy_pattern_scale,
+        }
+        try:
+            x, y = c_best_move(
+                board.cells,
+                board.size,
+                ai_stone,
+                board.move_count,
+                self.depth,
+                float(limit_ms),
+                weights,
+            )
+        except Exception:
+            return None
+        if board.is_inside(x, y) and board.get(x, y) == EMPTY and self._is_legal_move(board, x, y, ai_stone):
+            return Move(x, y)
+        return None
 
     def suggest_move(self, board: GameBoard, ai_stone: int) -> Tuple[Move, str]:
         move = self.best_move(board, ai_stone)

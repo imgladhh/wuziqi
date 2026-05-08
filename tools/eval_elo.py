@@ -25,6 +25,7 @@ class EngineConfig:
     use_quiescence: bool
     use_threat_space: bool
     use_lmr: bool = True
+    use_c_engine: bool = False
     use_segment_core_eval: bool = False
     use_vcf_probe: bool = True
     use_vct_probe: bool = True
@@ -110,6 +111,7 @@ def build_ai(config: EngineConfig, competitive: bool) -> GomokuAI:
         use_quiescence=config.use_quiescence,
         use_threat_space=config.use_threat_space,
         use_lmr=config.use_lmr,
+        use_c_engine=config.use_c_engine,
         use_segment_core_eval=config.use_segment_core_eval,
         use_vcf_probe=config.use_vcf_probe,
         use_vct_probe=config.use_vct_probe,
@@ -490,6 +492,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-b", type=int, default=1200, help="Per-move time budget for engine B (ms).")
     parser.add_argument("--disable-lmr-a", action="store_true", help="Disable LMR for engine A.")
     parser.add_argument("--disable-lmr-b", action="store_true", help="Disable LMR for engine B.")
+    parser.add_argument("--use-c-engine-a", action="store_true", help="Use the optional C engine backend for engine A.")
+    parser.add_argument("--use-c-engine-b", action="store_true", help="Use the optional C engine backend for engine B.")
     parser.add_argument("--enable-segment-core-a", action="store_true", help="Use experimental segment-line core eval for engine A.")
     parser.add_argument("--enable-segment-core-b", action="store_true", help="Use experimental segment-line core eval for engine B.")
     parser.add_argument("--disable-segment-core-a", action="store_true", help="Use the older per-stone core eval for engine A.")
@@ -519,6 +523,10 @@ def main() -> None:
         config_a.use_lmr = False
     if args.disable_lmr_b:
         config_b.use_lmr = False
+    if args.use_c_engine_a:
+        config_a.use_c_engine = True
+    if args.use_c_engine_b:
+        config_b.use_c_engine = True
     if args.enable_segment_core_a:
         config_a.use_segment_core_eval = True
     if args.enable_segment_core_b:
