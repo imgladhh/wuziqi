@@ -138,7 +138,7 @@ def apply_room_timeout(room: "Room") -> None:
 @dataclass
 class LocalGame:
     board: GameBoard = field(default_factory=GameBoard)
-    depth: int = 5
+    depth: int = 20
     current_turn: int = BLACK
     last_opponent_move: Optional[tuple[int, int]] = None
     competitive_mode: bool = False
@@ -377,7 +377,7 @@ async def index(_request: web.Request) -> web.StreamResponse:
 async def local_new(request: web.Request) -> web.Response:
     session_id = request_session_id(request)
     body = await read_json(request)
-    depth = int(body.get("depth", 5))
+    depth = int(body.get("depth", 20))
     competitive_mode = bool(body.get("competitive_mode", False))
     with STORE.lock:
         game = STORE.get_local(session_id)
@@ -413,7 +413,7 @@ async def local_move(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         game.current_turn = WHITE
         if not game.board.is_game_over:
-            ai = GomokuAI(depth=game.depth, use_c_engine=not game.competitive_mode)
+            ai = GomokuAI(depth=game.depth, time_limit_ms=800, use_c_engine=not game.competitive_mode)
             move = ai.best_move(game.board, WHITE)
             if game.board.place(move.x, move.y, WHITE):
                 game.last_opponent_move = (move.x, move.y)
@@ -657,7 +657,8 @@ async def room_hint(request: web.Request) -> web.Response:
         remaining_before_pause = room_time_left(room)
         legal_checker = is_forbidden_move if room.competitive_mode else None
         ai = GomokuAI(
-            depth=5,
+            depth=20,
+            time_limit_ms=800,
             legal_move_checker=(lambda b, px, py, s: not legal_checker(b, px, py, s)) if legal_checker else None,
             use_c_engine=not room.competitive_mode,
         )

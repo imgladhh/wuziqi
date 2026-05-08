@@ -42,6 +42,12 @@ typedef struct {
     int8_t best_y;
 } TTEntryC;
 
+typedef struct {
+    int x[64];
+    int y[64];
+    int count;
+} AffectedCells;
+
 static uint8_t g_cells[MAX_CELLS];
 static int g_size = MAX_SIZE;
 static int g_move_count = 0;
@@ -173,8 +179,15 @@ static int eval_board(int ai_stone) {
     return cw - (int)((double)cb * g_enemy_scale);
 }
 
-static int eval_for_side_to_move(int ai_stone, int current_stone) {
-    int value = eval_board(ai_stone);
+static int eval_from_scores(int ai_stone, int cb, int cw) {
+    if (ai_stone == BLACK) {
+        return cb - (int)((double)cw * g_enemy_scale);
+    }
+    return cw - (int)((double)cb * g_enemy_scale);
+}
+
+static int eval_for_side_to_move(int ai_stone, int current_stone, int cb, int cw) {
+    int value = eval_from_scores(ai_stone, cb, cw);
     return current_stone == ai_stone ? value : -value;
 }
 
@@ -212,6 +225,77 @@ static void remove_raw(int x, int y, int stone) {
     g_move_count--;
     g_hash ^= g_zobrist[x][y][stone];
     g_cells[idx_xy(x, y)] = EMPTY;
+}
+
+static void affected_add(AffectedCells *affected, int x, int y) {
+    if (!inside(x, y) || g_cells[idx_xy(x, y)] == EMPTY) return;
+    for (int i = 0; i < affected->count; i++) {
+        if (affected->x[i] == x && affected->y[i] == y) return;
+    }
+    if (affected->count >= 64) return;
+    affected->x[affected->count] = x;
+    affected->y[affected->count] = y;
+    affected->count++;
+}
+
+static void collect_affected(int x, int y, AffectedCells *affected) {
+    affected->count = 0;
+    for (int d = 0; d < 4; d++) {
+        int dx = DIRS[d][0];
+        int dy = DIRS[d][1];
+        for (int step = -5; step <= 5; step++) {
+            affected_add(affected, x + dx * step, y + dy * step);
+        }
+    }
+}
+
+static void apply_affected_delta(AffectedCells *affected, int phase, int sign, int *cb, int *cw) {
+    for (int i = 0; i < affected->count; i++) {
+        int x = affected->x[i];
+        int y = affected->y[i];
+        int stone = g_cells[idx_xy(x, y)];
+        if (stone == BLACK) {
+            *cb += sign * line_score_at(x, y, BLACK, phase);
+        } else if (stone == WHITE) {
+            *cw += sign * line_score_at(x, y, WHITE, phase);
+        }
+    }
+}
+
+static int place_incremental(int x, int y, int stone, int *cb, int *cw) {
+    int phase_before = phase_index();
+    AffectedCells affected;
+    collect_affected(x, y, &affected);
+    apply_affected_delta(&affected, phase_before, -1, cb, cw);
+
+    place_raw(x, y, stone);
+    int winner = has_five_from(x, y, stone) ? stone : EMPTY;
+    int phase_after = phase_index();
+    if (phase_after != phase_before) {
+        compute_core_scores(cb, cw);
+        return winner;
+    }
+
+    collect_affected(x, y, &affected);
+    apply_affected_delta(&affected, phase_after, 1, cb, cw);
+    return winner;
+}
+
+static void remove_incremental(int x, int y, int stone, int *cb, int *cw) {
+    int phase_before = phase_index();
+    AffectedCells affected;
+    collect_affected(x, y, &affected);
+    apply_affected_delta(&affected, phase_before, -1, cb, cw);
+
+    remove_raw(x, y, stone);
+    int phase_after = phase_index();
+    if (phase_after != phase_before) {
+        compute_core_scores(cb, cw);
+        return;
+    }
+
+    collect_affected(x, y, &affected);
+    apply_affected_delta(&affected, phase_after, 1, cb, cw);
 }
 
 static int move_pattern_tier(int x, int y, int stone) {
@@ -340,10 +424,10 @@ static void tt_store(uint64_t key, int depth, int score, int alpha_orig, int bet
     entry->best_y = (int8_t)best_y;
 }
 
-static int negamax(int depth, int alpha, int beta, int ai_stone, int current_stone, int ply) {
-    if (time_up()) return eval_for_side_to_move(ai_stone, current_stone);
+static int negamax(int depth, int alpha, int beta, int ai_stone, int current_stone, int ply, int cb, int cw) {
+    if (time_up()) return eval_for_side_to_move(ai_stone, current_stone, cb, cw);
     g_nodes++;
-    if (depth <= 0 || g_move_count >= g_size * g_size) return eval_for_side_to_move(ai_stone, current_stone);
+    if (depth <= 0 || g_move_count >= g_size * g_size) return eval_for_side_to_move(ai_stone, current_stone, cb, cw);
 
     int alpha_orig = alpha;
     int beta_orig = beta;
@@ -353,7 +437,7 @@ static int negamax(int depth, int alpha, int beta, int ai_stone, int current_sto
 
     MoveC moves[MAX_MOVES];
     int move_count = gen_candidates(moves, current_stone, ply);
-    if (move_count <= 0) return eval_for_side_to_move(ai_stone, current_stone);
+    if (move_count <= 0) return eval_for_side_to_move(ai_stone, current_stone, cb, cw);
 
     int best_score = -INF_SCORE;
     int best_x = moves[0].x;
@@ -362,27 +446,29 @@ static int negamax(int depth, int alpha, int beta, int ai_stone, int current_sto
 
     for (int i = 0; i < move_count; i++) {
         MoveC m = moves[i];
-        place_raw(m.x, m.y, current_stone);
+        int child_cb = cb;
+        int child_cw = cw;
+        int winner = place_incremental(m.x, m.y, current_stone, &child_cb, &child_cw);
         int score;
-        if (has_five_from(m.x, m.y, current_stone)) {
+        if (winner == current_stone) {
             score = WIN_SCORE - ply;
         } else {
             int next_depth = depth - 1;
             int reduced = depth >= 3 && i >= 4 && m.tier >= 4 && next_depth >= 2;
             int search_depth = reduced ? next_depth - 1 : next_depth;
             if (i == 0) {
-                score = -negamax(search_depth, -beta, -alpha, ai_stone, enemy, ply + 1);
+                score = -negamax(search_depth, -beta, -alpha, ai_stone, enemy, ply + 1, child_cb, child_cw);
             } else {
-                score = -negamax(search_depth, -alpha - 1, -alpha, ai_stone, enemy, ply + 1);
+                score = -negamax(search_depth, -alpha - 1, -alpha, ai_stone, enemy, ply + 1, child_cb, child_cw);
                 if (reduced && score > alpha) {
-                    score = -negamax(next_depth, -alpha - 1, -alpha, ai_stone, enemy, ply + 1);
+                    score = -negamax(next_depth, -alpha - 1, -alpha, ai_stone, enemy, ply + 1, child_cb, child_cw);
                 }
                 if (score > alpha && score < beta) {
-                    score = -negamax(next_depth, -beta, -alpha, ai_stone, enemy, ply + 1);
+                    score = -negamax(next_depth, -beta, -alpha, ai_stone, enemy, ply + 1, child_cb, child_cw);
                 }
             }
         }
-        remove_raw(m.x, m.y, current_stone);
+        remove_incremental(m.x, m.y, current_stone, &child_cb, &child_cw);
 
         if (score > best_score) {
             best_score = score;
@@ -414,7 +500,7 @@ static int find_immediate_win(int stone, int *out_x, int *out_y) {
     return 0;
 }
 
-static int search_root(int depth, int ai_stone) {
+static int search_root(int depth, int ai_stone, int cb0, int cw0) {
     MoveC moves[MAX_MOVES];
     int move_count = gen_candidates(moves, ai_stone, 0);
     int best_score = -INF_SCORE;
@@ -426,19 +512,21 @@ static int search_root(int depth, int ai_stone) {
 
     for (int i = 0; i < move_count; i++) {
         MoveC m = moves[i];
-        place_raw(m.x, m.y, ai_stone);
+        int child_cb = cb0;
+        int child_cw = cw0;
+        int winner = place_incremental(m.x, m.y, ai_stone, &child_cb, &child_cw);
         int score;
-        if (has_five_from(m.x, m.y, ai_stone)) {
+        if (winner == ai_stone) {
             score = WIN_SCORE;
         } else if (i == 0) {
-            score = -negamax(depth - 1, -beta, -alpha, ai_stone, enemy, 1);
+            score = -negamax(depth - 1, -beta, -alpha, ai_stone, enemy, 1, child_cb, child_cw);
         } else {
-            score = -negamax(depth - 1, -alpha - 1, -alpha, ai_stone, enemy, 1);
+            score = -negamax(depth - 1, -alpha - 1, -alpha, ai_stone, enemy, 1, child_cb, child_cw);
             if (score > alpha && score < beta) {
-                score = -negamax(depth - 1, -beta, -alpha, ai_stone, enemy, 1);
+                score = -negamax(depth - 1, -beta, -alpha, ai_stone, enemy, 1, child_cb, child_cw);
             }
         }
-        remove_raw(m.x, m.y, ai_stone);
+        remove_incremental(m.x, m.y, ai_stone, &child_cb, &child_cw);
         if (score > best_score) {
             best_score = score;
             best_x = m.x;
@@ -526,13 +614,17 @@ EXPORT int c_best_move(
         return 1;
     }
 
+    int cb0 = 0;
+    int cw0 = 0;
+    compute_core_scores(&cb0, &cw0);
+
     if (depth < 1) depth = 1;
     int last_x = -1;
     int last_y = -1;
     for (int d = 1; d <= depth; d++) {
         int before_x = g_best_x;
         int before_y = g_best_y;
-        search_root(d, stone);
+        search_root(d, stone, cb0, cw0);
         if (time_up()) {
             if (last_x >= 0) {
                 g_best_x = last_x;
