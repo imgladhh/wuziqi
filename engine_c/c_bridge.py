@@ -3,18 +3,19 @@ from __future__ import annotations
 import ctypes
 import pathlib
 import sys
-from typing import Mapping, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 
-_LIB = None
+_LIBS: Dict[str, ctypes.CDLL] = {}
 
 
-def load_lib():
-    global _LIB
-    if _LIB is not None:
-        return _LIB
+def load_lib(lib_path: Optional[str] = None):
     ext = ".dll" if sys.platform == "win32" else ".so"
-    path = pathlib.Path(__file__).resolve().parent / f"gomoku_engine{ext}"
+    path = pathlib.Path(lib_path) if lib_path else pathlib.Path(__file__).resolve().parent / f"gomoku_engine{ext}"
+    path = path.resolve()
+    cache_key = str(path)
+    if cache_key in _LIBS:
+        return _LIBS[cache_key]
     if not path.exists():
         raise FileNotFoundError(f"C engine library not found: {path}")
     lib = ctypes.CDLL(str(path))
@@ -39,7 +40,7 @@ def load_lib():
     ]
     lib.c_last_nodes.restype = ctypes.c_int
     lib.c_last_nodes.argtypes = []
-    _LIB = lib
+    _LIBS[cache_key] = lib
     return lib
 
 
@@ -52,8 +53,9 @@ def c_best_move(
     time_limit_ms: float,
     weights: Mapping[str, float],
     competitive: bool = False,
+    lib_path: Optional[str] = None,
 ) -> Tuple[int, int]:
-    lib = load_lib()
+    lib = load_lib(lib_path)
     flat_values = [int(board_2d[x][y]) for x in range(size) for y in range(size)]
     flat = (ctypes.c_uint8 * (size * size))(*flat_values)
     out_x = ctypes.c_int(-1)

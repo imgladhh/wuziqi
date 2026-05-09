@@ -601,6 +601,7 @@ class GomokuAI:
         iid_min_depth: int = 5,
         use_lmr: bool = True,
         use_c_engine: bool = False,
+        c_engine_path: Optional[str] = None,
         use_incremental_core_eval: bool = True,
         use_segment_core_eval: bool = False,
         use_eval_correction: bool = True,
@@ -648,6 +649,7 @@ class GomokuAI:
         self.iid_min_depth = max(3, iid_min_depth)
         self.use_lmr = use_lmr
         self.use_c_engine = use_c_engine
+        self.c_engine_path = c_engine_path
         self.use_incremental_core_eval = use_incremental_core_eval
         self.use_segment_core_eval = use_segment_core_eval
         self.use_eval_correction = use_eval_correction
@@ -829,6 +831,7 @@ class GomokuAI:
                 float(limit_ms),
                 weights,
                 competitive=competitive,
+                lib_path=self.c_engine_path,
             )
         except Exception:
             return None
