@@ -170,6 +170,48 @@ class AiEngineUpgradeTests(unittest.TestCase):
         ai._deadline = time.perf_counter() + 1.0
         self.assertTrue(ai._should_trigger_vcf_probe(board, BLACK))
 
+    def test_four_three_combo_detected_as_must_block(self) -> None:
+        board = GameBoard()
+        # If White plays (7, 7), it creates a horizontal half-four and a
+        # vertical open-three at the same time. Black should treat that point
+        # as a mandatory defensive candidate.
+        for x, y, stone in (
+            (4, 7, BLACK),
+            (5, 7, WHITE),
+            (6, 7, WHITE),
+            (8, 7, WHITE),
+            (7, 5, WHITE),
+            (7, 6, WHITE),
+        ):
+            self.assertTrue(board.place(x, y, stone))
+
+        ai = GomokuAI(depth=3, time_limit_ms=120, use_opening_book=False)
+        board.place(7, 7, WHITE)
+        try:
+            self.assertTrue(ai._creates_four_three_combo(board, 7, 7, WHITE))
+        finally:
+            board.remove(7, 7)
+
+        must_block = ai._must_block_moves(board, BLACK)
+        self.assertTrue(any((move.x, move.y) == (7, 7) for move in must_block))
+
+    def test_four_three_combo_block_gets_forcing_tier(self) -> None:
+        board = GameBoard()
+        for x, y, stone in (
+            (4, 7, BLACK),
+            (5, 7, WHITE),
+            (6, 7, WHITE),
+            (8, 7, WHITE),
+            (7, 5, WHITE),
+            (7, 6, WHITE),
+        ):
+            self.assertTrue(board.place(x, y, stone))
+
+        ai = GomokuAI(depth=3, time_limit_ms=120, use_opening_book=False)
+        ranked = ai._rank_moves(board, [Move(7, 7), Move(10, 10)], BLACK, ply=0)
+
+        self.assertEqual((7, 7), (ranked[0].x, ranked[0].y))
+
     def test_evaluate_board_more_defensive_against_enemy_open_four(self) -> None:
         ai = GomokuAI(depth=2, time_limit_ms=80, use_opening_book=False)
         board_risky = GameBoard()

@@ -240,6 +240,47 @@ static int has_overline_from(int x, int y, int stone) {
     return 0;
 }
 
+static void analyze_line_counts(int x, int y, int dx, int dy, int stone, int *count, int *open_ends) {
+    int total = 1;
+    int open = 0;
+    int nx = x + dx;
+    int ny = y + dy;
+    while (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == stone) {
+        total++;
+        nx += dx;
+        ny += dy;
+    }
+    if (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == EMPTY) open++;
+
+    nx = x - dx;
+    ny = y - dy;
+    while (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == stone) {
+        total++;
+        nx -= dx;
+        ny -= dy;
+    }
+    if (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == EMPTY) open++;
+
+    *count = total;
+    *open_ends = open;
+}
+
+static int creates_four_three_combo(int x, int y, int stone) {
+    int four_threats = 0;
+    int open_threes = 0;
+    for (int d = 0; d < 4; d++) {
+        int count = 0;
+        int open_ends = 0;
+        analyze_line_counts(x, y, DIRS[d][0], DIRS[d][1], stone, &count, &open_ends);
+        if (count >= 4 && open_ends >= 1) {
+            four_threats++;
+        } else if (count == 3 && open_ends == 2) {
+            open_threes++;
+        }
+    }
+    return four_threats >= 2 || (four_threats >= 1 && open_threes >= 1) || open_threes >= 2;
+}
+
 static void place_raw(int x, int y, int stone) {
     g_cells[idx_xy(x, y)] = (uint8_t)stone;
     g_hash ^= g_zobrist[x][y][stone];
@@ -424,18 +465,20 @@ static int move_pattern_tier(int x, int y, int stone) {
     int phase = phase_index();
     int own_best = 0;
     int enemy_best = 0;
+    int enemy_combo = 0;
     place_raw(x, y, stone);
     own_best = line_score_at(x, y, stone, phase);
     remove_raw(x, y, stone);
     place_raw(x, y, enemy);
     enemy_best = line_score_at(x, y, enemy, phase);
+    enemy_combo = creates_four_three_combo(x, y, enemy);
     remove_raw(x, y, enemy);
 
     int open_four = g_pat[phase][4][2];
     int half_four = g_pat[phase][4][1];
     int open_three = g_pat[phase][3][2];
     if (own_best >= open_four || enemy_best >= open_four) return 2;
-    if (own_best >= half_four || enemy_best >= half_four) return 3;
+    if (own_best >= half_four || enemy_best >= half_four || enemy_combo) return 3;
     if (own_best >= open_three) return 4;
     return 5;
 }

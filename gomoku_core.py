@@ -571,6 +571,7 @@ class GomokuAI:
     TIER_OWN_FIVE = 0
     TIER_BLOCK_ENEMY_FIVE = 1
     TIER_BLOCK_ENEMY_OPEN_FOUR = 2
+    TIER_BLOCK_ENEMY_COMBO = 3
     TIER_OWN_FOUR_THREAT = 3
     TIER_OWN_DOUBLE_THREE = 4
     TIER_NORMAL = 5
@@ -742,6 +743,10 @@ class GomokuAI:
             if vct_move is not None and self._is_legal_move(board, vct_move.x, vct_move.y, ai_stone):
                 return vct_move
 
+        combo_defense = self._find_combo_threat_response(board, ai_stone)
+        if combo_defense is not None:
+            return combo_defense
+
         if self.use_lazy_smp and self.smp_threads > 1 and board.move_count >= 6:
             smp_move = self._lazy_smp_root(board, ai_stone)
             if smp_move is not None and self._is_legal_move(board, smp_move.x, smp_move.y, ai_stone):
@@ -908,6 +913,8 @@ class GomokuAI:
         if self._find_open_four_points(board, stone, limit=1):
             return True
         if self._find_open_four_points(board, enemy, limit=1):
+            return True
+        if self._find_combo_threat_points(board, enemy, defender=stone, limit=1):
             return True
         lx, ly, ls = board.history[-1]
         return self._move_has_open_three_or_four(board, lx, ly, ls)
@@ -1488,17 +1495,21 @@ class GomokuAI:
             enemy_win_now = board.winner == enemy
             defend = self.evaluate_position(board, move.x, move.y, enemy)
             defend += self._fork_bonus(board, enemy)
+            defend += self._threat_space_bonus(board, move.x, move.y, enemy)
             blocks_enemy_open_four = self._is_open_four_created(board, move.x, move.y, enemy)
+            blocks_enemy_combo = self._creates_four_three_combo(board, move.x, move.y, enemy)
             board.remove(move.x, move.y)
 
             history_score = self._history_table.get((stone, move.x, move.y), 0) // 3
             killer_score = 90_000 if (move.x, move.y) in killers else 0
-            heuristic_score = attack + defend // 2 + history_score + killer_score
+            defend_weight = 3 if blocks_enemy_combo else 2
+            heuristic_score = attack + (defend * defend_weight) // 4 + history_score + killer_score
             move.score = heuristic_score
             tier = self._move_priority_tier(
                 own_win_now=own_win_now,
                 enemy_win_now=enemy_win_now,
                 blocks_enemy_open_four=blocks_enemy_open_four,
+                blocks_enemy_combo=blocks_enemy_combo,
                 own_four_threat=own_four_threat,
                 own_double_three=own_double_three,
             )
@@ -1512,6 +1523,7 @@ class GomokuAI:
         own_win_now: bool,
         enemy_win_now: bool,
         blocks_enemy_open_four: bool,
+        blocks_enemy_combo: bool,
         own_four_threat: bool,
         own_double_three: bool,
     ) -> int:
@@ -1521,6 +1533,8 @@ class GomokuAI:
             return self.TIER_BLOCK_ENEMY_FIVE
         if blocks_enemy_open_four:
             return self.TIER_BLOCK_ENEMY_OPEN_FOUR
+        if blocks_enemy_combo:
+            return self.TIER_BLOCK_ENEMY_COMBO
         if own_four_threat:
             return self.TIER_OWN_FOUR_THREAT
         if own_double_three:
@@ -1533,6 +1547,17 @@ class GomokuAI:
             if count >= 4 and open_ends >= 1:
                 return True
         return False
+
+    def _creates_four_three_combo(self, board: GameBoard, x: int, y: int, stone: int) -> bool:
+        four_threats = 0
+        open_threes = 0
+        for dx, dy in DIRECTIONS:
+            count, open_ends = self._analyze_line(board, x, y, dx, dy, stone)
+            if count >= 4 and open_ends >= 1:
+                four_threats += 1
+            elif count == 3 and open_ends == 2:
+                open_threes += 1
+        return four_threats >= 2 or (four_threats >= 1 and open_threes >= 1) or open_threes >= 2
 
     def _find_winning_move(self, board: GameBoard, stone: int) -> Optional[Move]:
         for move in self._urgent_moves(board, stone):
@@ -1550,7 +1575,7 @@ class GomokuAI:
             if not self._is_legal_move(board, move.x, move.y, stone):
                 continue
             board.place(move.x, move.y, stone)
-            creates_threat = self._creates_major_threat(board, move.x, move.y, stone)
+            creates_threat = self._is_open_four_created(board, move.x, move.y, stone)
             board.remove(move.x, move.y)
             if creates_threat:
                 return Move(move.x, move.y, self.FORCE_SCORE // 2)
@@ -1583,7 +1608,45 @@ class GomokuAI:
             if self._is_legal_move(board, move.x, move.y, stone) and (move.x, move.y) not in seen:
                 seen.add((move.x, move.y))
                 out.append(Move(move.x, move.y, self.FORCE_SCORE // 2))
+        if out:
+            return out
+        for move in self._find_combo_threat_points(board, enemy, defender=stone, limit=10):
+            if (move.x, move.y) not in seen:
+                seen.add((move.x, move.y))
+                out.append(move)
         return out
+
+    def _find_combo_threat_response(self, board: GameBoard, stone: int) -> Optional[Move]:
+        enemy = opponent(stone)
+        points = self._find_combo_threat_points(board, enemy, defender=stone, limit=1)
+        return points[0] if points else None
+
+    def _find_combo_threat_points(
+        self,
+        board: GameBoard,
+        attacker: int,
+        defender: Optional[int] = None,
+        limit: int = 8,
+    ) -> List[Move]:
+        defender_stone = opponent(attacker) if defender is None else defender
+        points: List[Move] = []
+        seen: set[Tuple[int, int]] = set()
+        for move in board.focused_candidate_moves(distance=3, limit_area=6):
+            if (move.x, move.y) in seen:
+                continue
+            if not self._is_legal_move(board, move.x, move.y, defender_stone):
+                continue
+            if not self._is_legal_move(board, move.x, move.y, attacker):
+                continue
+            board.place(move.x, move.y, attacker)
+            combo = self._creates_four_three_combo(board, move.x, move.y, attacker)
+            board.remove(move.x, move.y)
+            if combo:
+                seen.add((move.x, move.y))
+                points.append(Move(move.x, move.y, self.FORCE_SCORE // 3))
+                if len(points) >= limit:
+                    break
+        return points
 
     def _iid_probe_move(
         self,
