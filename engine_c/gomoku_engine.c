@@ -16,6 +16,8 @@
 #define WIN_SCORE 10000000
 #define INF_SCORE 2000000000
 #define TT_SIZE (1 << 20)
+#define VCF_MAX_DEPTH 8
+#define VCF_MAX_NODES 2000
 
 enum {
     EMPTY = 0,
@@ -62,6 +64,7 @@ static int g_nodes = 0;
 static int g_best_x = -1;
 static int g_best_y = -1;
 static int g_competitive = 0;
+static int g_vcf_nodes = 0;
 static TTEntryC g_tt[TT_SIZE];
 
 static const int DIRS[4][2] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
@@ -336,6 +339,34 @@ static int forbidden_type(int x, int y, int stone) {
     }
     remove_raw(x, y, stone);
     return result;
+}
+
+static int move_creates_four_threat(int x, int y, int stone) {
+    if (!inside(x, y) || g_cells[idx_xy(x, y)] != stone) return 0;
+    for (int d = 0; d < 4; d++) {
+        int dx = DIRS[d][0];
+        int dy = DIRS[d][1];
+        int count = 1;
+        int open_ends = 0;
+        int lx = x - dx;
+        int ly = y - dy;
+        while (inside(lx, ly) && g_cells[idx_xy(lx, ly)] == stone) {
+            count++;
+            lx -= dx;
+            ly -= dy;
+        }
+        if (inside(lx, ly) && g_cells[idx_xy(lx, ly)] == EMPTY) open_ends++;
+        int rx = x + dx;
+        int ry = y + dy;
+        while (inside(rx, ry) && g_cells[idx_xy(rx, ry)] == stone) {
+            count++;
+            rx += dx;
+            ry += dy;
+        }
+        if (inside(rx, ry) && g_cells[idx_xy(rx, ry)] == EMPTY) open_ends++;
+        if (count == 4 && open_ends >= 1) return 1;
+    }
+    return 0;
 }
 
 static void affected_add(AffectedCells *affected, int x, int y) {
@@ -620,6 +651,101 @@ static int find_immediate_win(int stone, int *out_x, int *out_y) {
     return 0;
 }
 
+static int collect_winning_moves(int stone, MoveC *moves, int max_moves) {
+    MoveC candidates[MAX_MOVES];
+    int candidate_count = gen_candidates(candidates, stone, 0);
+    int count = 0;
+    for (int i = 0; i < candidate_count && count < max_moves; i++) {
+        MoveC m = candidates[i];
+        if (g_competitive && stone == BLACK && forbidden_type(m.x, m.y, stone) != 0) continue;
+        place_raw(m.x, m.y, stone);
+        int wins = has_five_from(m.x, m.y, stone);
+        remove_raw(m.x, m.y, stone);
+        if (wins) {
+            moves[count++] = m;
+        }
+    }
+    return count;
+}
+
+static int gen_four_threats(int attacker, MoveC *moves, int max_moves) {
+    MoveC candidates[MAX_MOVES];
+    int candidate_count = gen_candidates(candidates, attacker, 0);
+    int count = 0;
+    for (int i = 0; i < candidate_count && count < max_moves; i++) {
+        MoveC m = candidates[i];
+        if (g_competitive && attacker == BLACK && forbidden_type(m.x, m.y, attacker) != 0) continue;
+        place_raw(m.x, m.y, attacker);
+        int is_threat = has_five_from(m.x, m.y, attacker) || move_creates_four_threat(m.x, m.y, attacker);
+        remove_raw(m.x, m.y, attacker);
+        if (is_threat) {
+            moves[count++] = m;
+        }
+    }
+    return count;
+}
+
+static int vcf_search(int attacker, int depth, int *first_x, int *first_y, int is_root) {
+    if (depth <= 0 || g_vcf_nodes >= VCF_MAX_NODES || time_up()) return 0;
+    g_vcf_nodes++;
+
+    int defender = opp(attacker);
+    MoveC attacks[MAX_MOVES];
+    int attack_count = gen_four_threats(attacker, attacks, CANDIDATE_LIMIT);
+    if (attack_count <= 0) return 0;
+
+    for (int i = 0; i < attack_count; i++) {
+        MoveC attack = attacks[i];
+        if (g_competitive && attacker == BLACK && forbidden_type(attack.x, attack.y, attacker) != 0) continue;
+        place_raw(attack.x, attack.y, attacker);
+        if (has_five_from(attack.x, attack.y, attacker)) {
+            if (is_root) {
+                *first_x = attack.x;
+                *first_y = attack.y;
+            }
+            remove_raw(attack.x, attack.y, attacker);
+            return 1;
+        }
+
+        MoveC wins[MAX_MOVES];
+        int win_count = collect_winning_moves(attacker, wins, MAX_MOVES);
+        if (win_count >= 2) {
+            if (is_root) {
+                *first_x = attack.x;
+                *first_y = attack.y;
+            }
+            remove_raw(attack.x, attack.y, attacker);
+            return 1;
+        }
+        if (win_count == 1) {
+            MoveC block = wins[0];
+            int defender_can_block = !(g_competitive && defender == BLACK && forbidden_type(block.x, block.y, defender) != 0);
+            if (defender_can_block && g_cells[idx_xy(block.x, block.y)] == EMPTY) {
+                place_raw(block.x, block.y, defender);
+                int result = vcf_search(attacker, depth - 1, first_x, first_y, 0);
+                remove_raw(block.x, block.y, defender);
+                if (result) {
+                    if (is_root) {
+                        *first_x = attack.x;
+                        *first_y = attack.y;
+                    }
+                    remove_raw(attack.x, attack.y, attacker);
+                    return 1;
+                }
+            } else {
+                if (is_root) {
+                    *first_x = attack.x;
+                    *first_y = attack.y;
+                }
+                remove_raw(attack.x, attack.y, attacker);
+                return 1;
+            }
+        }
+        remove_raw(attack.x, attack.y, attacker);
+    }
+    return 0;
+}
+
 static int search_root(int depth, int ai_stone, int cb0, int cw0) {
     MoveC moves[MAX_MOVES];
     int move_count = gen_candidates(moves, ai_stone, 0);
@@ -734,6 +860,17 @@ EXPORT int c_best_move(
         *out_x = x;
         *out_y = y;
         return 1;
+    }
+
+    if (g_move_count >= 6) {
+        g_vcf_nodes = 0;
+        int vx = -1;
+        int vy = -1;
+        if (vcf_search(stone, VCF_MAX_DEPTH, &vx, &vy, 1) && vx >= 0 && vy >= 0) {
+            *out_x = vx;
+            *out_y = vy;
+            return 1;
+        }
     }
 
     int cb0 = 0;
