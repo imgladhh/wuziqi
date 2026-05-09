@@ -364,23 +364,50 @@ function renderChat(messages) {
     return;
   }
 
-  els.chatMessages.innerHTML = messages.map((message) => {
+  // Build each message item via DOM API so that audio_data and text content
+  // are never interpolated into an HTML string — eliminating any XSS vector
+  // regardless of what characters the server returns.
+  const fragment = document.createDocumentFragment();
+  for (const message of messages) {
+    const item = document.createElement("div");
     const classes = ["chat-item"];
     if (message.system) classes.push("system");
     if (message.from_you) classes.push("self");
-    const body = message.message_type === "voice"
-      ? `<audio controls preload="none" src="${message.audio_data}"></audio>`
-      : `<div class="chat-text">${escapeHtml(message.text || "")}</div>`;
-    return `
-      <div class="${classes.join(" ")}">
-        <div class="chat-meta">
-          <span class="chat-sender">${escapeHtml(message.sender || "系统")}</span>
-          <span class="chat-time">${formatTimestamp(message.timestamp)}</span>
-        </div>
-        ${body}
-      </div>
-    `;
-  }).join("");
+    item.className = classes.join(" ");
+
+    // Meta row (sender + timestamp) — values are escaped via escapeHtml
+    const meta = document.createElement("div");
+    meta.className = "chat-meta";
+    const senderSpan = document.createElement("span");
+    senderSpan.className = "chat-sender";
+    senderSpan.textContent = message.sender || "系统";
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "chat-time";
+    timeSpan.textContent = formatTimestamp(message.timestamp);
+    meta.appendChild(senderSpan);
+    meta.appendChild(timeSpan);
+    item.appendChild(meta);
+
+    if (message.message_type === "voice") {
+      // Assign src via DOM property — the browser never parses it as HTML,
+      // so no attribute-injection or tag-injection is possible.
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = message.audio_data || "";
+      item.appendChild(audio);
+    } else {
+      const textDiv = document.createElement("div");
+      textDiv.className = "chat-text";
+      textDiv.textContent = message.text || "";
+      item.appendChild(textDiv);
+    }
+
+    fragment.appendChild(item);
+  }
+
+  els.chatMessages.innerHTML = "";
+  els.chatMessages.appendChild(fragment);
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
 
@@ -427,9 +454,29 @@ function scheduleLocalSocketReconnect() {
   }, 1200);
 }
 
+/**
+ * Returns true if `incoming` state should replace the current state.local.
+ *
+ * Two guards run in order:
+ *  1. Cross-game guard — if both sides carry a game_id and they differ, the
+ *     incoming state belongs to a different game session (e.g. an old delayed
+ *     GET after "重新开始") and must be discarded.
+ *  2. Within-game guard — even for the same game, never roll move_count back
+ *     (covers the original POST-vs-GET race).
+ */
+function shouldAcceptLocalState(incoming) {
+  if (!state.local || !incoming) return true;
+  if (state.local.game_id && incoming.game_id && incoming.game_id !== state.local.game_id) {
+    return false;
+  }
+  return incoming.move_count >= state.local.move_count;
+}
+
 function handleLocalSocketMessage(payload) {
   if (payload.type === "local_state" && payload.state) {
-    state.local = payload.state;
+    if (shouldAcceptLocalState(payload.state)) {
+      state.local = payload.state;
+    }
     updateInfo();
     return;
   }
@@ -553,7 +600,9 @@ function connectRoomSocket() {
 
 async function loadLocalState() {
   const payload = await api("/api/local/state", { method: "GET" });
-  state.local = payload.state;
+  if (shouldAcceptLocalState(payload.state)) {
+    state.local = payload.state;
+  }
 }
 
 async function startLocal() {
@@ -759,8 +808,9 @@ async function handleBoardClick(event) {
   if (!board || board[x][y] !== EMPTY) return;
 
   if (state.mode === "local") {
-    if (!state.local || state.local.winner !== "empty" || state.local.current_turn !== "black") {
-      throw new Error(state.local?.winner !== "empty" ? "本局已经结束。" : "当前还不能落子。");
+    const localOver = !state.local || state.local.winner !== "empty" || state.local.win_reason === "draw";
+    if (localOver || state.local.current_turn !== "black") {
+      throw new Error(localOver ? "本局已经结束。" : "当前还不能落子。");
     }
     await localMove(x, y);
     return;
@@ -768,7 +818,7 @@ async function handleBoardClick(event) {
 
   if (state.mode === "room") {
     if (!state.room?.match_entered) throw new Error("房主还没有让双方进入对局。");
-    if (state.room.winner !== "empty") throw new Error("本局已经结束。");
+    if (state.room.winner !== "empty" || state.room.win_reason === "draw") throw new Error("本局已经结束。");
     if (!state.room.your_turn) throw new Error("当前不是你的回合。");
     await roomMove(x, y);
   }
@@ -795,6 +845,9 @@ function updateInfo() {
     if (state.local.winner !== "empty") {
       els.turnLabel.textContent = "对局结束";
       setStatus(state.local.winner === "black" ? "玩家获胜。" : "AI 获胜。");
+    } else if (state.local.win_reason === "draw") {
+      els.turnLabel.textContent = "对局结束";
+      setStatus("平局，棋盘已满。");
     } else {
       els.turnLabel.textContent = state.local.current_turn === "black" ? "你回合" : "AI 回合";
     }
@@ -813,9 +866,11 @@ function updateInfo() {
       if (state.screen === "game") {
         setStatus(state.room.connected_count < 2 ? "对手已退出棋局。" : (state.room.is_host ? "等待你点击“进入对局”。" : "等待房主让双方进入对局。"));
       }
-    } else if (state.room.winner !== "empty") {
+    } else if (state.room.winner !== "empty" || state.room.win_reason === "draw") {
       els.turnLabel.textContent = "对局结束";
-      if (state.room.win_reason === "timeout") {
+      if (state.room.win_reason === "draw") {
+        setStatus("平局，棋盘已满。");
+      } else if (state.room.win_reason === "timeout") {
         setStatus(state.room.winner === state.room.your_stone ? "你通过超时获胜。" : "你超时落败。");
       } else if (state.room.winner === state.room.your_stone) {
         setStatus("你赢了这局。");
@@ -837,7 +892,7 @@ function updateInfo() {
     }
 
     els.hintUsageLabel.textContent = state.room.hint_used ? "已使用" : "未使用";
-    const canUseHint = state.room.match_entered && !state.room.hint_used && state.room.your_turn && state.room.winner === "empty";
+    const canUseHint = state.room.match_entered && !state.room.hint_used && state.room.your_turn && state.room.winner === "empty" && state.room.win_reason !== "draw";
     els.hintRoomBtn.disabled = !canUseHint;
     els.hintRoomBtn.textContent = state.room.hint_used ? "AI 提示已用" : "使用 AI 提示";
     renderHintPanel(state.room.active_hint || null);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -14,6 +15,12 @@ from aiohttp import WSMsgType, web
 
 from gomoku_core import BLACK, EMPTY, WHITE, GameBoard, GomokuAI, forbidden_reason, is_forbidden_move, opponent
 
+
+# Only these MIME sub-types are accepted for voice messages.  The regex is
+# anchored to the header so the (potentially large) base64 body is not scanned.
+_AUDIO_HEADER_RE = re.compile(
+    r"^data:audio/(webm|mp4|mpeg|ogg|wav|aac);base64,"
+)
 
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "web"
@@ -85,6 +92,11 @@ def room_win_reason(room: "Room") -> str:
     return ""
 
 
+def room_is_over(room: "Room") -> bool:
+    """Return True for any terminal state: line win, timeout win, or draw."""
+    return room_win_reason(room) != ""
+
+
 def room_hint_pause_active(room: "Room") -> bool:
     return room.hint_pause_session is not None and room.hint_pause_until > now_ts()
 
@@ -142,6 +154,7 @@ class LocalGame:
     current_turn: int = BLACK
     last_opponent_move: Optional[tuple[int, int]] = None
     competitive_mode: bool = False
+    game_id: str = field(default_factory=lambda: secrets.token_hex(8))
 
     def reset(self, depth: int, competitive_mode: bool = False) -> None:
         self.board.reset()
@@ -149,6 +162,7 @@ class LocalGame:
         self.current_turn = BLACK
         self.last_opponent_move = None
         self.competitive_mode = competitive_mode
+        self.game_id = secrets.token_hex(8)
 
 
 @dataclass
@@ -287,13 +301,22 @@ def board_payload(board: GameBoard) -> list[list[int]]:
 
 
 def local_state_payload(game: LocalGame) -> dict[str, Any]:
+    board = game.board
+    if board.winner != EMPTY:
+        win_reason = "line"
+    elif board.move_count >= board.size * board.size:
+        win_reason = "draw"
+    else:
+        win_reason = ""
     return {
-        "board": board_payload(game.board),
-        "winner": stone_name(game.board.winner),
+        "board": board_payload(board),
+        "winner": stone_name(board.winner),
         "current_turn": stone_name(game.current_turn),
         "last_opponent_move": list(game.last_opponent_move) if game.last_opponent_move else None,
-        "move_count": game.board.move_count,
+        "move_count": board.move_count,
         "competitive_mode": game.competitive_mode,
+        "game_id": game.game_id,
+        "win_reason": win_reason,
     }
 
 
@@ -558,7 +581,7 @@ async def room_move(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         if not room.match_entered:
             return json_response({"ok": False, "error": "\u623f\u4e3b\u8fd8\u6ca1\u6709\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
-        if room_winner(room) != EMPTY:
+        if room_is_over(room):
             return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if room.competitive_mode and stone == BLACK:
             reason = forbidden_reason(room.board, x, y, BLACK)
@@ -613,7 +636,7 @@ async def room_undo(request: web.Request) -> web.Response:
         if session_id not in room.players:
             return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         apply_room_timeout(room)
-        if room_winner(room) != EMPTY:
+        if room_is_over(room):
             return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if action == "request":
             room.pending_undo_request = session_id
@@ -653,7 +676,7 @@ async def room_hint(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         if not room.match_entered:
             return json_response({"ok": False, "error": "\u623f\u4e3b\u8fd8\u6ca1\u6709\u8ba9\u53cc\u65b9\u8fdb\u5165\u5bf9\u5c40\u3002"}, session_id, 400)
-        if room_winner(room) != EMPTY:
+        if room_is_over(room):
             return json_response({"ok": False, "error": "\u672c\u5c40\u5df2\u7ecf\u7ed3\u675f\u3002"}, session_id, 400)
         if room.current_turn != stone:
             return json_response({"ok": False, "error": "\u53ea\u80fd\u5728\u4f60\u7684\u56de\u5408\u8bf7\u6c42\u63d0\u793a\u3002"}, session_id, 400)
@@ -702,7 +725,7 @@ async def room_chat(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u4f60\u4e0d\u5728\u8fd9\u4e2a\u623f\u95f4\u91cc\u3002"}, session_id, 403)
         sender = room.names.get(session_id, stone_name(room.players.get(session_id, EMPTY)))
         if message_type == "voice":
-            if not audio_data or not audio_data.startswith("data:audio/"):
+            if not audio_data or not _AUDIO_HEADER_RE.match(audio_data):
                 return json_response({"ok": False, "error": "\u8bed\u97f3\u6d88\u606f\u6570\u636e\u65e0\u6548\u3002"}, session_id, 400)
             if len(audio_data) > 1_500_000:
                 return json_response({"ok": False, "error": "\u8bed\u97f3\u6d88\u606f\u8fc7\u5927\u3002"}, session_id, 400)
