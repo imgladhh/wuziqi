@@ -1,24 +1,19 @@
 # 五子棋 Web 项目
 
-基于 `Python + aiohttp + WebSocket` 的五子棋项目，支持：
+基于 `Python + aiohttp + WebSocket` 的五子棋项目，支持本地人机、网络对战、聊天、悔棋、AI 提示、每手读秒和竞技禁手规则。
 
-- 本地人机对局（Minimax + Alpha-Beta）
-- 联机房间对战（WebSocket 实时同步）
-- 竞技模式（禁手规则）
-- 悔棋、聊天、语音消息、AI 提示、每手读秒
-- Bench / Elo 评测工具链
+## 当前状态
+
+- 本地普通 AI 默认使用 C 引擎，`depth=20` 配合每手 `800ms` 时间控制自动迭代加深。
+- 竞技模式也可使用 C 引擎，C 侧已实现黑棋禁手过滤，Python 侧仍保留最终合法性兜底。
+- Render 部署会在 build 阶段自动编译 C 扩展，不需要提交 `.dll` 或 `.so`。
+- C 版 VCF 探针已实测收益约为 0，当前已移除，避免额外维护复杂度。
 
 ## 快速启动
 
 ```powershell
 cd E:\wuziqi
-python .\web_server.py
-```
-
-如果你本机命令是 `py`：
-
-```powershell
-py .\web_server.py
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" .\web_server.py
 ```
 
 打开浏览器：
@@ -27,135 +22,119 @@ py .\web_server.py
 http://127.0.0.1:8000
 ```
 
-## 测试命令
+如果你的 `python` 命令可用，也可以直接运行：
 
 ```powershell
-python -m unittest tests/test_gomoku_ai_engine.py
-python -m unittest tests/test_engine_p1.py
-python -m unittest tests/test_gomoku_competitive.py
+python .\web_server.py
 ```
 
-## Bench / Elo 评测
+## C 引擎
 
-### 1) 微基准
-
-```powershell
-python .\tools\bench_micro.py --dataset bench\midgame.json --loops 5000 --samples 30 --output reports\micro_report.json
-```
-
-### 2) 搜索质量基准
-
-```powershell
-python .\tools\bench_search.py --dataset bench\midgame.json --depth 3 --time-ms 800 --repeat 3 --disable-forced --disable-opening-book --disable-vcf-vct --output reports\search_report.json
-```
-
-### 3) 战术与规则基准
-
-```powershell
-python .\tools\bench_tactical.py --tactical bench\tactical.json --rules bench\rules.json --depth 3 --time-ms 800 --output reports\tactical_report.json
-```
-
-### 4) Elo 对战评测
-
-```powershell
-python .\tools\eval_elo.py --games 200 --depth-a 2 --depth-b 3 --time-a 300 --time-b 500 --output reports\elo_report.md
-```
-
-## 本轮 AI 优化（已完成）
-
-### P1：候选分层硬规则
-
-在候选排序里加入硬优先级，确保威胁处理优先于 `history/killer`：
-
-1. 己方成五
-2. 挡对方成五
-3. 挡对方活四
-4. 己方冲四/活四
-5. 己方双三
-6. 普通点位（再用启发式排序）
-
-### P2：VCF/VCT 窄触发 + 快返回
-
-- 根节点触发门槛：只在“局面有强战术信号”时触发 VCF/VCT
-- 剩余时间门槛：时间不足时不触发
-- 节点与宽度上限：超限快速返回 `UNKNOWN`
-- 目标：避免 VCF/VCT 在平静局面吞掉搜索预算
-
-### P3：评估函数防守增强
-
-- 增大对“对手威胁”的惩罚权重
-- 对“对手成五点/活四/强威胁”加入额外负分
-- 目标：降低“只顾进攻不回防”的错误
-
-## 最新验证结果（本地实测）
-
-- 单测：`tests/test_gomoku_ai_engine.py`、`tests/test_engine_p1.py` 全通过
-- 战术基准：`tactical_accuracy` 提升到 `1.0000`
-- Elo（200局）：`Elo(A-B) = -6.95`，置信区间 `[-55.56, 41.39]`
-
-结论：当前版本在战术防守正确率上有提升，但 Elo 仍未达到统计显著提升。
-
-## 下一步路线图（Elo 导向）
-
-执行顺序固定为：
-
-1. 先消融，定位负优化模块
-2. 再加速，提升有效搜索深度
-3. 再分配，把深度给威胁分支
-4. 最后做剪枝与排序微调
-
-一句话原则：
+源码位于：
 
 ```text
-先定位负优化 → 再提升有效深度 → 最后优化深度分配
+engine_c/gomoku_engine.c
+engine_c/c_bridge.py
+engine_c/build.py
 ```
 
-## 阶段一（已开工）：A/B/C/D/E 消融矩阵
-
-目标：找到拖 Elo 的模块（VCF 或 P3 权重是否过强）。
-
-矩阵定义：
-
-- A: baseline（当前默认）
-- B: P3 off
-- C: VCF/VCT off
-- D: P3 half + strict VCF
-- E: P3 half only
-
-一键运行：
+本地编译：
 
 ```powershell
-python .\tools\run_ablation_matrix.py --games 400 --depth-a 3 --depth-b 3 --time-a 500 --time-b 500 --bench-depth 3 --bench-time-ms 800 --bench-repeat 3 --output reports\ablation_matrix.md
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" .\engine_c\build.py
 ```
 
-输出：
+编译产物：
 
-- `reports/ablation_matrix.md`
-- `reports/bench_B_p3_off.json` 等各 profile 的搜索基准
+- Windows: `engine_c/gomoku_engine.dll`
+- Linux/Render: `engine_c/gomoku_engine.so`
 
-会同时记录这些指标：
+这些产物已被 `.gitignore` 忽略。若 C 扩展缺失或加载失败，`GomokuAI` 会自动回退 Python 引擎。
 
-- Elo（含 95% CI）
-- NPS（估算）
-- avg depth（迭代深度均值）
-- VCF 决策影响率（`vcf_impact_rate_mean`）
-- Root score volatility（分数波动代理）
-- First-move fail-high proxy（`1 - first_candidate_final_rate`）
+## AI 结果
 
-### 阶段一判定规则
+主要已验证收益：
 
-- 若 `C_vcf_off` 明显更强：VCF 当前是负资产，继续收紧/临时关
-- 若 `B_p3_off` 或 `E_p3_half_only` 更强：P3 防守权重过高
-- 若 `D_p3_half_strict_vcf` 最强：方向正确，固定中等强度
+| 对比 | 结果 |
+|---|---:|
+| Python depth 3 vs C depth 5 | C 约 +269 Elo |
+| Python 基线 vs C 时间控深搜 | C 约 +288 Elo |
+| C 深搜 + VCF 探针 | 约 0 Elo 增益 |
 
-## 部署（Render）
+结论：
 
-仓库已包含 `render.yaml`。推送到 GitHub 后，Render 会自动触发部署（若已开启自动部署）。
+- 最大收益来自 C 引擎、增量评估和时间控深搜。
+- 在 800ms 时间预算下，C 引擎能自然搜索到较深层，VCF 探针覆盖的强制线已基本被 alpha-beta 深搜包含。
+- 下一阶段若继续提升棋力，优先方向应是评估函数质量，而不是继续增加独立战术探针。
 
-手动部署常用流程：
+## 常用测试
+
+运行全部单测：
 
 ```powershell
-git add .
-git commit -m "Update gomoku web app"
-git push origin main
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" -m unittest discover -s tests
 ```
+
+只跑竞技禁手测试：
+
+```powershell
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" -m unittest tests.test_gomoku_competitive
+```
+
+## Elo 评测
+
+C 引擎时间控 vs Python 基线：
+
+```powershell
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" .\tools\eval_elo.py `
+  --games 200 `
+  --depth-a 3 --depth-b 20 `
+  --time-a 800 --time-b 800 `
+  --use-c-engine-b `
+  --output reports\c_engine_elo.md
+```
+
+C depth 5 vs C depth 20 时间控：
+
+```powershell
+& "C:\Users\imglad1991\AppData\Local\Programs\Python\Python313\python.exe" .\tools\eval_elo.py `
+  --games 100 `
+  --depth-a 5 --depth-b 20 `
+  --time-a 200 --time-b 200 `
+  --use-c-engine-a --use-c-engine-b `
+  --output reports\depth20_vs_depth5.md
+```
+
+## Render 部署
+
+`render.yaml` 已配置自动构建：
+
+```yaml
+buildCommand: |
+  pip install -r requirements.txt
+  python engine_c/build.py
+startCommand: python web_server.py
+```
+
+推送到 GitHub 后，如果 Render 已开启自动部署，会自动编译 Linux `.so` 并启动服务。部署日志中应能看到类似：
+
+```text
+Built: /opt/render/project/src/engine_c/gomoku_engine.so
+```
+
+## 下一步路线
+
+短期：
+
+- 上线当前 C 引擎版本。
+- 持续保留 Elo/bench 工具，避免后续优化出现负收益。
+
+中期：
+
+- 升级评估函数，细分跳三、眠三、连三等棋型。
+- 加入双方威胁的非线性组合分数。
+- 用固定测试集评估战术正确率、搜索稳定性和 Elo。
+
+长期：
+
+- 评估 NNUE 或小型神经网络估值，但这属于新的工程阶段。
