@@ -33,6 +33,7 @@ def load_lib():
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_double,
+        ctypes.c_int,
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
     ]
@@ -50,6 +51,7 @@ def c_best_move(
     depth: int,
     time_limit_ms: float,
     weights: Mapping[str, float],
+    competitive: bool = False,
 ) -> Tuple[int, int]:
     lib = load_lib()
     flat_values = [int(board_2d[x][y]) for x in range(size) for y in range(size)]
@@ -70,6 +72,7 @@ def c_best_move(
         int(weights["score_open_two"]),
         int(weights["score_half_two"]),
         float(weights["enemy_scale"]),
+        int(competitive),
         ctypes.byref(out_x),
         ctypes.byref(out_y),
     )

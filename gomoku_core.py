@@ -798,10 +798,9 @@ class GomokuAI:
     def _c_engine_move(self, board: GameBoard, ai_stone: int, limit_ms: int) -> Optional[Move]:
         if not self.use_c_engine:
             return None
-        # The first C backend intentionally mirrors regular Gomoku only. Competitive
-        # Renju forbidden-move checks continue through the Python engine.
-        if board.size != 15 or self._legal_move_checker is not None:
+        if board.size != 15:
             return None
+        competitive = self._legal_move_checker is not None
         try:
             from engine_c.c_bridge import c_best_move
         except Exception:
@@ -824,6 +823,7 @@ class GomokuAI:
                 self.depth,
                 float(limit_ms),
                 weights,
+                competitive=competitive,
             )
         except Exception:
             return None

@@ -3,5 +3,7 @@ services:
     name: wuziqi-web
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      python engine_c/build.py
     startCommand: python web_server.py

@@ -61,6 +61,7 @@ static double g_time_limit_ms = 1200.0;
 static int g_nodes = 0;
 static int g_best_x = -1;
 static int g_best_y = -1;
+static int g_competitive = 0;
 static TTEntryC g_tt[TT_SIZE];
 
 static const int DIRS[4][2] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
@@ -215,6 +216,30 @@ static int has_five_from(int x, int y, int stone) {
     return 0;
 }
 
+static int has_overline_from(int x, int y, int stone) {
+    for (int d = 0; d < 4; d++) {
+        int dx = DIRS[d][0];
+        int dy = DIRS[d][1];
+        int count = 1;
+        int nx = x + dx;
+        int ny = y + dy;
+        while (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == stone) {
+            count++;
+            nx += dx;
+            ny += dy;
+        }
+        nx = x - dx;
+        ny = y - dy;
+        while (inside(nx, ny) && g_cells[idx_xy(nx, ny)] == stone) {
+            count++;
+            nx -= dx;
+            ny -= dy;
+        }
+        if (count >= 6) return 1;
+    }
+    return 0;
+}
+
 static void place_raw(int x, int y, int stone) {
     g_cells[idx_xy(x, y)] = (uint8_t)stone;
     g_hash ^= g_zobrist[x][y][stone];
@@ -225,6 +250,92 @@ static void remove_raw(int x, int y, int stone) {
     g_move_count--;
     g_hash ^= g_zobrist[x][y][stone];
     g_cells[idx_xy(x, y)] = EMPTY;
+}
+
+static int live_four_window_in_direction(int x, int y, int dx, int dy, int stone, int ex, int ey) {
+    int px[11];
+    int py[11];
+    int center = 5;
+    for (int offset = -5; offset <= 5; offset++) {
+        int i = offset + 5;
+        px[i] = x + offset * dx;
+        py[i] = y + offset * dy;
+    }
+    for (int start = 0; start <= 5; start++) {
+        int left_x = px[start];
+        int left_y = py[start];
+        int right_x = px[start + 5];
+        int right_y = py[start + 5];
+        if (!inside(left_x, left_y) || !inside(right_x, right_y)) continue;
+        if (g_cells[idx_xy(left_x, left_y)] != EMPTY || g_cells[idx_xy(right_x, right_y)] != EMPTY) continue;
+        if (!(start + 1 <= center && center <= start + 4)) continue;
+        int has_extension = (ex < 0 || ey < 0);
+        int ok = 1;
+        for (int i = start + 1; i <= start + 4; i++) {
+            if (!inside(px[i], py[i]) || g_cells[idx_xy(px[i], py[i])] != stone) {
+                ok = 0;
+                break;
+            }
+            if (px[i] == ex && py[i] == ey) has_extension = 1;
+        }
+        if (ok && has_extension) return 1;
+    }
+    return 0;
+}
+
+static int count_live_four_directions(int x, int y, int stone) {
+    int total = 0;
+    for (int d = 0; d < 4; d++) {
+        if (live_four_window_in_direction(x, y, DIRS[d][0], DIRS[d][1], stone, -1, -1)) {
+            total++;
+        }
+    }
+    return total;
+}
+
+static int open_three_in_direction(int x, int y, int dx, int dy, int stone) {
+    for (int offset = -4; offset <= 4; offset++) {
+        int ex = x + offset * dx;
+        int ey = y + offset * dy;
+        if (!inside(ex, ey) || g_cells[idx_xy(ex, ey)] != EMPTY) continue;
+        place_raw(ex, ey, stone);
+        int is_open_three = 0;
+        if (!has_overline_from(ex, ey, stone)) {
+            is_open_three = live_four_window_in_direction(x, y, dx, dy, stone, ex, ey);
+        }
+        remove_raw(ex, ey, stone);
+        if (is_open_three) return 1;
+    }
+    return 0;
+}
+
+static int count_open_three_directions(int x, int y, int stone) {
+    int total = 0;
+    for (int d = 0; d < 4; d++) {
+        if (open_three_in_direction(x, y, DIRS[d][0], DIRS[d][1], stone)) {
+            total++;
+        }
+    }
+    return total;
+}
+
+static int forbidden_type(int x, int y, int stone) {
+    if (!g_competitive || stone != BLACK) return 0;
+    if (!inside(x, y) || g_cells[idx_xy(x, y)] != EMPTY) return 0;
+
+    place_raw(x, y, stone);
+    int result = 0;
+    if (has_overline_from(x, y, stone)) {
+        result = 1;
+    } else if (has_five_from(x, y, stone)) {
+        result = 0;
+    } else if (count_live_four_directions(x, y, stone) >= 2) {
+        result = 2;
+    } else if (count_open_three_directions(x, y, stone) >= 2) {
+        result = 3;
+    }
+    remove_raw(x, y, stone);
+    return result;
 }
 
 static void affected_add(AffectedCells *affected, int x, int y) {
@@ -390,6 +501,15 @@ static int gen_candidates(MoveC *moves, int stone, int ply) {
             j--;
         }
         moves[j + 1] = key;
+    }
+    if (g_competitive && stone == BLACK) {
+        int filtered = 0;
+        for (int i = 0; i < count; i++) {
+            if (forbidden_type(moves[i].x, moves[i].y, BLACK) == 0) {
+                moves[filtered++] = moves[i];
+            }
+        }
+        count = filtered;
     }
     if (count > CANDIDATE_LIMIT) count = CANDIDATE_LIMIT;
     return count;
@@ -571,6 +691,7 @@ EXPORT int c_best_move(
     int score_open_two,
     int score_half_two,
     double enemy_scale,
+    int competitive,
     int *out_x,
     int *out_y
 ) {
@@ -586,6 +707,7 @@ EXPORT int c_best_move(
     g_nodes = 0;
     g_best_x = -1;
     g_best_y = -1;
+    g_competitive = competitive ? 1 : 0;
     g_time_limit_ms = time_limit_ms;
     g_start_ms = now_ms();
     g_enemy_scale = enemy_scale;

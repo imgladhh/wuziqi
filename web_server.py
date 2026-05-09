@@ -413,7 +413,12 @@ async def local_move(request: web.Request) -> web.Response:
             return json_response({"ok": False, "error": "\u5f53\u524d\u65e0\u6cd5\u843d\u5b50\u3002"}, session_id, 400)
         game.current_turn = WHITE
         if not game.board.is_game_over:
-            ai = GomokuAI(depth=game.depth, time_limit_ms=800, use_c_engine=not game.competitive_mode)
+            ai = GomokuAI(
+                depth=game.depth,
+                time_limit_ms=800,
+                legal_move_checker=(lambda b, px, py, s: not is_forbidden_move(b, px, py, s)) if game.competitive_mode else None,
+                use_c_engine=True,
+            )
             move = ai.best_move(game.board, WHITE)
             if game.board.place(move.x, move.y, WHITE):
                 game.last_opponent_move = (move.x, move.y)
@@ -660,7 +665,7 @@ async def room_hint(request: web.Request) -> web.Response:
             depth=20,
             time_limit_ms=800,
             legal_move_checker=(lambda b, px, py, s: not legal_checker(b, px, py, s)) if legal_checker else None,
-            use_c_engine=not room.competitive_mode,
+            use_c_engine=True,
         )
         move, reason = ai.suggest_move(room.board, stone)
         if room.competitive_mode and stone == BLACK and is_forbidden_move(room.board, move.x, move.y, stone):
